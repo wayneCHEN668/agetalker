@@ -3,7 +3,7 @@ import { ScrollView, Text, StyleSheet, View } from 'react-native';
 import { Design } from '../constants/Design';
 
 interface TranscriptAreaProps {
-  history: string[];
+  history: { text: string, emotion?: any }[];
   interim?: string;
 }
 
@@ -29,9 +29,14 @@ export const TranscriptArea: React.FC<TranscriptAreaProps> = ({ history, interim
           <Text style={styles.placeholder}>等待您的发言...</Text>
         )}
         
-        {history.map((text, index) => (
+        {history.map((item, index) => (
           <View key={`history-${index}`} style={styles.bubble}>
-            <Text style={styles.text}>{text}</Text>
+            <Text style={styles.text}>
+              {item.text}
+              {item.emotion?.label_zh && (
+                <Text style={styles.emotionText}> [{item.emotion.label_zh}]</Text>
+              )}
+            </Text>
           </View>
         ))}
         
@@ -89,6 +94,12 @@ const styles = StyleSheet.create({
   },
   interimText: {
     color: Design.colors.onSurfaceVariant,
+  },
+  emotionText: {
+    fontSize: 14,
+    color: Design.colors.primary,
+    fontWeight: '600',
+    fontStyle: 'italic',
   },
   placeholder: {
     fontFamily: Design.typography.fontFamily,

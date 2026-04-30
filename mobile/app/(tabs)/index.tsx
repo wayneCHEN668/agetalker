@@ -10,14 +10,14 @@ import { ActionButton } from '@/components/ActionButton';
 import { useASR } from '@/hooks/useASR';
 
 export default function HomeScreen() {
-  const [history, setHistory] = useState<string[]>([]);
+  const [history, setHistory] = useState<{text: string, emotion?: any}[]>([]);
   const [interim, setInterim] = useState('');
   const [response, setResponse] = useState('听起来今天有些疲惫，能告诉我是什么让您累了吗?');
 
   const { start, stop, status, isRecording, analyser } = useASR({
-    onTranscript: (text, isFinal) => {
+    onTranscript: (text, isFinal, emotion) => {
       if (isFinal) {
-        setHistory(prev => [...prev, text]);
+        setHistory(prev => [...prev, { text, emotion }]);
         setInterim('');
       } else {
         setInterim(text);

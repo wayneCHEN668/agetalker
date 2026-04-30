@@ -6,6 +6,7 @@ from datetime import datetime, timezone, timedelta
 import numpy as np
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect
 from asr_manager import get_asr_manager, bytes_to_float32, compute_rms
+from emotion_manager import get_emotion_manager
 from dotenv import load_dotenv
 
 load_dotenv()
@@ -13,7 +14,7 @@ load_dotenv()
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
-app = FastAPI(title="AgeTalker ASR Service")
+app = FastAPI(title="AgeTalker ASR & Emotion Service")
 
 # Constants from design doc
 SAMPLE_RATE = 16000
@@ -24,9 +25,14 @@ SILENCE_FRAMES = 12      # ~1.5s (12 * 128ms)
 @app.on_event("startup")
 async def startup_event():
     # Pre-load models at startup
-    logger.info("Service starting up, warming up ASR models...")
+    logger.info("Service starting up, warming up ASR and Emotion models...")
     # This might take time, but we do it once
-    asyncio.to_thread(get_asr_manager)
+    def warmup():
+        get_asr_manager()
+        get_emotion_manager()
+        
+    await asyncio.to_thread(warmup)
+    logger.info("Models warmed up and ready ✅")
 
 @app.get("/health")
 async def health_check():
@@ -35,9 +41,13 @@ async def health_check():
 @app.websocket("/ws/asr")
 async def asr_endpoint(websocket: WebSocket):
     await websocket.accept()
-    logger.info(f"Client connected: {websocket.client}")
+    # Extract session_id for multi-user support
+    session_id = websocket.query_params.get("session_id", "default_user")
+    logger.info(f"Client connected: {websocket.client}, session_id: {session_id}")
     
     asr_manager = get_asr_manager()
+    emotion_manager = get_emotion_manager()
+    
     audio_buffer = []
     silent_frames = 0
     
@@ -65,12 +75,17 @@ async def asr_endpoint(websocket: WebSocket):
                 
                 await websocket.send_text(json.dumps({"type": "status", "state": "processing"}))
                 
-                # Perform transcription in a separate thread to keep WS responsive
-                text = await asyncio.to_thread(asr_manager.transcribe, audio)
+                # Perform ASR and Emotion analysis concurrently
+                # to reduce total latency for Step 3
+                asr_task = asyncio.to_thread(asr_manager.transcribe, audio)
+                emotion_task = asyncio.to_thread(emotion_manager.analyze, audio, session_id)
+                
+                text, emotion_res = await asyncio.gather(asr_task, emotion_task)
                 
                 if text.strip():
-                    logger.info(f"Transcription: {text}")
-                    # Prepare base64 for emotional analysis (Step 2)
+                    logger.info(f"Session {session_id} | Transcript: {text} | Emotion: {emotion_res['label_zh']} ({emotion_res['score']})")
+                    
+                    # Prepare base64 for history/display (Step 2)
                     audio_b64 = base64.b64encode(
                         (audio * 32768).astype(np.int16).tobytes()
                     ).decode()
@@ -78,9 +93,11 @@ async def asr_endpoint(websocket: WebSocket):
                     # Beijing Time (UTC+8)
                     beijing_time = datetime.now(timezone(timedelta(hours=8))).strftime("%Y-%m-%d %H:%M:%S")
                     
+                    # Combined result sent to frontend and ready for Step 3 (LLM)
                     await websocket.send_text(json.dumps({
                         "type": "transcript",
                         "text": text,
+                        "emotion": emotion_res,          # Combined emotion data
                         "is_final": True,
                         "audio_b64": audio_b64,
                         "duration_ms": int(len(audio) / SAMPLE_RATE * 1000),
@@ -90,13 +107,13 @@ async def asr_endpoint(websocket: WebSocket):
                 await websocket.send_text(json.dumps({"type": "status", "state": "listening"}))
                 
     except WebSocketDisconnect:
-        logger.info(f"Client disconnected: {websocket.client}")
+        logger.info(f"Client disconnected: {websocket.client}, session_id: {session_id}")
     except Exception as e:
-        logger.error(f"WebSocket error: {e}")
+        logger.error(f"WebSocket error for session {session_id}: {e}")
         try:
             await websocket.send_text(json.dumps({
                 "type": "error",
-                "code": "ASR_ERROR",
+                "code": "PIPELINE_ERROR",
                 "message": str(e)
             }))
         except:

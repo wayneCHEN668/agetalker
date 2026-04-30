@@ -2,7 +2,7 @@ import { useState, useCallback, useRef, useEffect } from 'react';
 import { Platform } from 'react-native';
 
 interface UseASROptions {
-  onTranscript?: (text: string, isFinal: boolean) => void;
+  onTranscript?: (text: string, isFinal: boolean, emotion?: any) => void;
   onStatusChange?: (status: 'idle' | 'listening' | 'processing') => void;
   wsUrl?: string;
 }
@@ -61,7 +61,7 @@ export const useASR = ({ onTranscript, onStatusChange, wsUrl = 'ws://localhost:8
       wsRef.current.onmessage = (event) => {
         const data = JSON.parse(event.data);
         if (data.type === 'transcript') {
-          onTranscript?.(data.text, data.is_final);
+          onTranscript?.(data.text, data.is_final, data.emotion);
         } else if (data.type === 'status') {
           setStatus(data.state);
           onStatusChange?.(data.state);
