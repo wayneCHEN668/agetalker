@@ -1,0 +1,73 @@
+export const Design = {
+  colors: {
+    surface: '#f4faff',
+    surfaceDim: '#c0dfee',
+    surfaceBright: '#f4faff',
+    surfaceContainerLowest: '#ffffff',
+    surfaceContainerLow: '#e6f6ff',
+    surfaceContainer: '#d9f0fc',
+    surfaceContainerHigh: '#cceaf9',
+    surfaceContainerHighest: '#bfe4f6',
+    onSurface: '#001e2c',
+    onSurfaceVariant: '#40484c',
+    outline: '#70787d',
+    outlineVariant: '#c0c8cc',
+    primary: '#00668a',
+    onPrimary: '#ffffff',
+    primaryContainer: '#c3e8ff',
+    onPrimaryContainer: '#001e2c',
+    secondary: '#4e616c',
+    onSecondary: '#ffffff',
+    secondaryContainer: '#d1e5f2',
+    onSecondaryContainer: '#0a1e28',
+    tertiary: '#5f5a7d',
+    onTertiary: '#ffffff',
+    tertiaryContainer: '#e5deff',
+    onTertiaryContainer: '#1b1736',
+    error: '#ba1a1a',
+    onError: '#ffffff',
+    errorContainer: '#ffdad6',
+    onErrorContainer: '#410002',
+    happyBg: '#FFD54F',
+    tiredBg: '#E3F2FD',
+  },
+  typography: {
+    fontFamily: 'Lexend_400Regular',
+    displayLarge: {
+      fontSize: 57,
+      lineHeight: 64,
+    },
+    displayMedium: {
+      fontSize: 45,
+      lineHeight: 52,
+    },
+    displaySmall: {
+      fontSize: 36,
+      lineHeight: 44,
+    },
+    headlineLarge: {
+      fontSize: 32,
+      lineHeight: 40,
+    },
+    headlineMedium: {
+      fontSize: 28,
+      lineHeight: 36,
+    },
+    headlineSmall: {
+      fontSize: 24,
+      lineHeight: 32,
+    },
+    bodyLarge: {
+      fontSize: 20,
+      lineHeight: 28,
+    },
+    bodyMedium: {
+      fontSize: 18,
+      lineHeight: 24,
+    },
+  },
+  layout: {
+    roundness: 32,
+    spacing: 24,
+  },
+};

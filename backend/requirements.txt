@@ -5,3 +5,5 @@ fastapi
 uvicorn[standard]
 numpy
 python-dotenv
+pytest
+pytest-asyncio

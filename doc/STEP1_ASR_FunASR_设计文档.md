@@ -58,13 +58,13 @@
 ```
 前端 (Vue3/React)
   │
-  │  WebSocket 连接: ws://localhost:8000/ws/asr
+  │  WebSocket 连接: ws://localhost:8050/ws/asr
   │  ─── 二进制帧: PCM 16kHz 16bit mono ──→
   ↓
 ASR WebSocket 服务 (FastAPI)
   │
   ├─ 音频缓冲区 (AudioBuffer)
-  │    ↓  每 100ms 追加一帧 (1600 samples)
+  │    ↓  每 128ms 追加一帧 (2048 samples)
   ├─ 静音检测（RMS 能量 + 帧计数）
   │    ├─ 检测到语音 → 继续累积
   │    └─ 静音 ≥ 1.5s 且有积累音频 → 触发推理
@@ -211,9 +211,9 @@ asr = AutoModel(
 
 HOTWORDS = open('hotwords.txt', encoding='utf-8').read().strip()
 SAMPLE_RATE = 16000
-FRAME_SIZE = 1600        # 100ms @ 16kHz
+FRAME_SIZE = 2048        # ~128ms @ 16kHz
 SILENCE_RMS = 0.008      # 静音 RMS 阈值
-SILENCE_FRAMES = 15      # 15帧 × 100ms = 1.5s
+SILENCE_FRAMES = 12      # 12帧 × 128ms ≈ 1.5s
 
 logger.info("ASR 模型加载完成 ✅")
 
@@ -324,7 +324,7 @@ window.addEventListener('tts-end', () => {
   setTimeout(() => { ttsMuted = false }, 200)  // 延迟 200ms 再恢复
 })
 
-export function useASR(wsUrl = 'ws://localhost:8000/ws/asr') {
+export function useASR(wsUrl = 'ws://localhost:8050/ws/asr') {
   const transcript = ref('')
   const status = ref<'idle' | 'listening' | 'processing'>('idle')
   const error = ref('')
@@ -377,7 +377,7 @@ export function useASR(wsUrl = 'ws://localhost:8000/ws/asr') {
 
     audioContext = new AudioContext({ sampleRate: 16000 })
     const source = audioContext.createMediaStreamSource(mediaStream)
-    processor = audioContext.createScriptProcessor(1600, 1, 1)  // 100ms 帧
+    processor = audioContext.createScriptProcessor(2048, 1, 1)  // ~128ms 帧
 
     processor.onaudioprocess = (e) => {
       // TTS 播放期间跳过发送（回声消除）
@@ -447,8 +447,8 @@ export function useASR(wsUrl = 'ws://localhost:8000/ws/asr') {
 ### 前端 → 后端（二进制帧）
 
 ```
-每 100ms 发送一帧 PCM 数据
-格式: ArrayBuffer (Int16Array, 16kHz, 单声道, 1600 samples/帧)
+每 128ms 发送一帧 PCM 数据
+格式: ArrayBuffer (Int16Array, 16kHz, 单声道, 2048 samples/帧)
 ```
 
 ### 后端 → 前端（JSON 文本帧）
@@ -489,10 +489,10 @@ export function useASR(wsUrl = 'ws://localhost:8000/ws/asr') {
 
 ```bash
 # 开发模式（热重载）
-uvicorn asr_server:app --host 0.0.0.0 --port 8000 --reload
+uvicorn asr_server:app --host 0.0.0.0 --port 8050 --reload
 
 # 生产模式
-uvicorn asr_server:app --host 0.0.0.0 --port 8000 --workers 1
+uvicorn asr_server:app --host 0.0.0.0 --port 8050 --workers 1
 
 # 注意：ASR 模型有状态（audio_buffer），workers 建议设为 1
 # 如需多并发，每个 WebSocket 连接维护独立缓冲区，已在代码中实现
@@ -549,7 +549,7 @@ class TestAudioUtils:
 async def test_websocket_connects():
     """TC-04: WebSocket 正常建立连接并收到 status 消息"""
     import websockets
-    async with websockets.connect('ws://localhost:8000/ws/asr') as ws:
+    async with websockets.connect('ws://localhost:8050/ws/asr') as ws:
         msg = json.loads(await asyncio.wait_for(ws.recv(), timeout=5))
         assert msg['type'] == 'status'
         assert msg['state'] == 'listening'
