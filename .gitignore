@@ -1,0 +1,27 @@
+# Python
+__pycache__/
+.venv/
+backend/.venv/
+*.py[cod]
+*$py.class
+
+# Models
+.model_cache/
+backend/.model_cache/
+
+# Node
+node_modules/
+dist/
+
+# Mobile
+.expo/
+*.jks
+*.p8
+*.p12
+*.key
+*.mobileprovision
+*.orig.*
+
+# Environment
+.env
+.env.local

@@ -1,0 +1,8 @@
+{
+  "name": "agetalker",
+  "private": true,
+  "scripts": {
+    "backend": "cd backend && uvicorn main:app --reload",
+    "mobile": "cd mobile && npx expo start"
+  }
+}
