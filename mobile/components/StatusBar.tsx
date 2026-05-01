@@ -9,15 +9,18 @@ interface StatusBarProps {
 export const StatusBar: React.FC<StatusBarProps> = ({ status }) => {
   const getStatusText = () => {
     switch (status) {
-      case 'listening': return '正在聆听...';
-      case 'processing': return '正在处理...';
-      default: return '已就绪';
+      case 'listening': return '正在聆听';
+      case 'processing': return '思考中';
+      default: return 'AgeTalker 已就绪';
     }
   };
 
   return (
     <View style={styles.container}>
-      <View style={[styles.indicator, { backgroundColor: status === 'listening' ? Design.colors.happyBg : Design.colors.outline }]} />
+      <View style={[
+        styles.indicator, 
+        { backgroundColor: status === 'listening' ? '#FFD54F' : Design.colors.outline }
+      ]} />
       <Text style={styles.text}>{getStatusText()}</Text>
     </View>
   );
@@ -25,23 +28,23 @@ export const StatusBar: React.FC<StatusBarProps> = ({ status }) => {
 
 const styles = StyleSheet.create({
   container: {
-    height: 60,
+    height: 30, // Reduced by half
     flexDirection: 'row',
     alignItems: 'center',
     justifyContent: 'center',
-    backgroundColor: Design.colors.surfaceContainer,
-    borderBottomWidth: 1,
-    borderBottomColor: Design.colors.outlineVariant,
+    backgroundColor: 'rgba(0,0,0,0.03)',
   },
   indicator: {
-    width: 12,
-    height: 12,
-    borderRadius: 6,
-    marginRight: 10,
+    width: 8,
+    height: 8,
+    borderRadius: 4,
+    marginRight: 8,
   },
   text: {
     fontFamily: Design.typography.fontFamily,
-    ...Design.typography.headlineSmall,
-    color: Design.colors.onSurface,
+    fontSize: 12,
+    fontWeight: '600',
+    color: Design.colors.text.secondary,
+    letterSpacing: 0.5,
   },
 });

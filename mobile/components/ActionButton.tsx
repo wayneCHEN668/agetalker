@@ -1,5 +1,5 @@
 import React from 'react';
-import { TouchableOpacity, Text, StyleSheet } from 'react-native';
+import { TouchableOpacity, Text, StyleSheet, View } from 'react-native';
 import { Design } from '../constants/Design';
 
 interface ActionButtonProps {
@@ -9,31 +9,43 @@ interface ActionButtonProps {
 
 export const ActionButton: React.FC<ActionButtonProps> = ({ isRecording, onPress }) => {
   return (
-    <TouchableOpacity
-      style={[styles.button, { backgroundColor: isRecording ? Design.colors.error : Design.colors.primary }]}
-      onPress={onPress}
-      activeOpacity={0.8}
-    >
-      <Text style={styles.text}>{isRecording ? "挂断" : "开始对话"}</Text>
-    </TouchableOpacity>
+    <View style={styles.container}>
+      <TouchableOpacity
+        style={[
+          styles.button, 
+          { backgroundColor: isRecording ? '#ba1a1a' : Design.colors.primary }
+        ]}
+        onPress={onPress}
+        activeOpacity={0.9}
+      >
+        <Text style={styles.text}>{isRecording ? "挂断" : "点击说话"}</Text>
+      </TouchableOpacity>
+    </View>
   );
 };
 
 const styles = StyleSheet.create({
+  container: {
+    paddingHorizontal: Design.layout.spacing * 2, // More side padding for a more compact button
+    paddingBottom: 40,
+  },
   button: {
-    height: 80,
-    marginHorizontal: Design.layout.spacing,
-    marginBottom: Design.layout.spacing,
-    borderRadius: 40,
+    height: 72,
+    borderRadius: 36,
     alignItems: 'center',
     justifyContent: 'center',
-    elevation: 4,
-    boxShadow: '0px 2px 3.84px rgba(0, 0, 0, 0.25)',
+    // Ultra-premium tactile shadow
+    shadowColor: '#000',
+    shadowOffset: { width: 0, height: 8 },
+    shadowOpacity: 0.15,
+    shadowRadius: 12,
+    elevation: 8,
   },
   text: {
     fontFamily: Design.typography.fontFamily,
-    ...Design.typography.headlineMedium,
+    fontSize: 20,
     color: '#ffffff',
-    fontWeight: 'bold',
+    fontWeight: '700',
+    letterSpacing: 1,
   },
 });

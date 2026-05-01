@@ -1,73 +1,62 @@
 export const Design = {
   colors: {
-    surface: '#f4faff',
-    surfaceDim: '#c0dfee',
-    surfaceBright: '#f4faff',
-    surfaceContainerLowest: '#ffffff',
-    surfaceContainerLow: '#e6f6ff',
-    surfaceContainer: '#d9f0fc',
-    surfaceContainerHigh: '#cceaf9',
-    surfaceContainerHighest: '#bfe4f6',
-    onSurface: '#001e2c',
-    onSurfaceVariant: '#40484c',
-    outline: '#70787d',
-    outlineVariant: '#c0c8cc',
-    primary: '#00668a',
-    onPrimary: '#ffffff',
-    primaryContainer: '#c3e8ff',
-    onPrimaryContainer: '#001e2c',
-    secondary: '#4e616c',
-    onSecondary: '#ffffff',
-    secondaryContainer: '#d1e5f2',
-    onSecondaryContainer: '#0a1e28',
-    tertiary: '#5f5a7d',
-    onTertiary: '#ffffff',
-    tertiaryContainer: '#e5deff',
-    onTertiaryContainer: '#1b1736',
-    error: '#ba1a1a',
-    onError: '#ffffff',
-    errorContainer: '#ffdad6',
-    onErrorContainer: '#410002',
-    happyBg: '#FFD54F',
-    tiredBg: '#E3F2FD',
+    // 基础背景
+    background: '#FAF9F6', // 暖沙色，护眼且温馨
+    surface: '#FFFFFF',
+    surfaceDim: '#F0EFEA',
+    
+    // 主色调：愈疗绿 (Sage)
+    primary: '#4A6741',      // 深鼠尾草绿，沉稳可靠
+    onPrimary: '#FFFFFF',
+    primaryContainer: '#E8F5E9',
+    onPrimaryContainer: '#1B2E16',
+    
+    // 辅助色
+    secondary: '#70787D',
+    outline: '#E0E0E0',
+    
+    // 情绪背景光晕 (Aura Colors)
+    aura: {
+      neutral: ['#F5F5F5', '#E3F2FD'],
+      happy: ['#FFF9C4', '#FFE082'],
+      sad: ['#E1F5FE', '#B3E5FC'],
+      angry: ['#FFEBEE', '#FFCDD2'],
+      fearful: ['#F3E5F5', '#E1BEE7'],
+      disgusted: ['#F1F8E9', '#DCEDC8'],
+      surprised: ['#E0F7FA', '#B2EBF2'],
+    },
+
+    text: {
+      primary: '#2D3436',   // 极高对比度
+      secondary: '#636E72',
+      hint: '#B2BEC3',
+    }
   },
   typography: {
     fontFamily: 'Lexend_400Regular',
-    displayLarge: {
-      fontSize: 57,
-      lineHeight: 64,
+    display: {
+      fontSize: 40,
+      lineHeight: 48,
+      fontWeight: '700',
     },
-    displayMedium: {
-      fontSize: 45,
-      lineHeight: 52,
-    },
-    displaySmall: {
-      fontSize: 36,
-      lineHeight: 44,
-    },
-    headlineLarge: {
-      fontSize: 32,
-      lineHeight: 40,
-    },
-    headlineMedium: {
+    headline: {
       fontSize: 28,
       lineHeight: 36,
+      fontWeight: '600',
     },
-    headlineSmall: {
-      fontSize: 24,
-      lineHeight: 32,
+    message: {
+      fontSize: 20,         // 减小 2 号，原为 22
+      lineHeight: 30,
     },
-    bodyLarge: {
-      fontSize: 20,
-      lineHeight: 28,
-    },
-    bodyMedium: {
-      fontSize: 18,
-      lineHeight: 24,
-    },
+    label: {
+      fontSize: 14,
+      letterSpacing: 1.5,
+      fontWeight: '600',
+    }
   },
   layout: {
-    roundness: 32,
+    radius: 32,
     spacing: 24,
+    innerPadding: 20,
   },
 };

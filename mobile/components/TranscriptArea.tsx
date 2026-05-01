@@ -23,20 +23,22 @@ export const TranscriptArea: React.FC<TranscriptAreaProps> = ({ history, interim
         ref={scrollViewRef}
         style={styles.container} 
         contentContainerStyle={styles.content}
-        showsVerticalScrollIndicator={true}
+        showsVerticalScrollIndicator={false}
       >
         {history.length === 0 && !interim && (
-          <Text style={styles.placeholder}>等待您的发言...</Text>
+          <Text style={styles.placeholder}>您可以随时对我说话，我会一直在这里陪着您。</Text>
         )}
         
         {history.map((item, index) => (
           <View key={`history-${index}`} style={styles.bubble}>
             <Text style={styles.text}>
               {item.text}
-              {item.emotion?.label_zh && (
-                <Text style={styles.emotionText}> [{item.emotion.label_zh}]</Text>
-              )}
             </Text>
+            {item.emotion?.label_zh && (
+              <View style={styles.emotionTag}>
+                <Text style={styles.emotionText}>感受：{item.emotion.label_zh}</Text>
+              </View>
+            )}
           </View>
         ))}
         
@@ -53,7 +55,7 @@ export const TranscriptArea: React.FC<TranscriptAreaProps> = ({ history, interim
 const styles = StyleSheet.create({
   outerContainer: {
     flex: 1,
-    maxHeight: 400, // Limit height to make it scrollable
+    maxHeight: 350,
     marginHorizontal: Design.layout.spacing,
     marginTop: 10,
   },
@@ -62,47 +64,58 @@ const styles = StyleSheet.create({
   },
   content: {
     paddingVertical: 10,
-    gap: 12,
+    gap: 20,
   },
   bubble: {
-    backgroundColor: Design.colors.surfaceContainerLow,
-    paddingHorizontal: 16,
-    paddingVertical: 12,
-    borderRadius: 20,
-    borderTopLeftRadius: 4, // Chat-like style
+    backgroundColor: Design.colors.primaryContainer,
+    paddingHorizontal: 20,
+    paddingVertical: 16,
+    borderRadius: Design.layout.radius,
+    borderBottomLeftRadius: 4,
     alignSelf: 'flex-start',
-    maxWidth: '85%',
-    // Subtle shadow for premium feel
-    boxShadow: '0px 1px 2px rgba(0, 0, 0, 0.05)',
+    maxWidth: '90%',
+    shadowColor: '#000',
+    shadowOffset: { width: 0, height: 2 },
+    shadowOpacity: 0.05,
+    shadowRadius: 10,
     elevation: 2,
   },
   interimBubble: {
-    backgroundColor: Design.colors.surfaceContainerLowest,
+    backgroundColor: Design.colors.surface,
     borderStyle: 'dashed',
-    borderWidth: 1,
-    borderColor: Design.colors.outlineVariant,
-    opacity: 0.8,
+    borderWidth: 1.5,
+    borderColor: Design.colors.primary,
+    opacity: 0.7,
   },
   text: {
     fontFamily: Design.typography.fontFamily,
-    ...Design.typography.bodyLarge,
-    color: Design.colors.onSurface,
-    lineHeight: 28,
+    fontSize: Design.typography.message.fontSize,
+    lineHeight: Design.typography.message.lineHeight,
+    color: Design.colors.onPrimaryContainer,
   },
   interimText: {
-    color: Design.colors.onSurfaceVariant,
+    color: Design.colors.text.secondary,
+  },
+  emotionTag: {
+    marginTop: 8,
+    alignSelf: 'flex-start',
+    backgroundColor: 'rgba(74, 103, 65, 0.1)',
+    paddingHorizontal: 10,
+    paddingVertical: 4,
+    borderRadius: 8,
   },
   emotionText: {
     fontSize: 14,
     color: Design.colors.primary,
     fontWeight: '600',
-    fontStyle: 'italic',
   },
   placeholder: {
     fontFamily: Design.typography.fontFamily,
-    ...Design.typography.bodyLarge,
-    color: Design.colors.outline,
+    fontSize: 18,
+    lineHeight: 28,
+    color: Design.colors.text.hint,
     textAlign: 'center',
-    marginTop: 40,
+    marginTop: 60,
+    paddingHorizontal: 40,
   },
 });

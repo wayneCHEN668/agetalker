@@ -34,11 +34,11 @@ export default function TabLayout() {
           paddingBottom: 10,
         },
         headerTitleStyle: {
-          fontSize: 32, // Doubled for accessibility
+          fontSize: 22, // Adjusted to fit smaller header
           fontFamily: 'Lexend_400Regular',
         },
         headerStyle: {
-          height: 100, // Increased header height
+          height: 50, // Reduced by half (100 -> 50)
         }
       }}>
       <Tabs.Screen
