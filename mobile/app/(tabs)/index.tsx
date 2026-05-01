@@ -8,17 +8,21 @@ import { ResponseArea } from '@/components/ResponseArea';
 import { ActionButton } from '@/components/ActionButton';
 
 import { useASR } from '@/hooks/useASR';
+import { useLLM } from '@/hooks/useLLM';
 
 export default function HomeScreen() {
   const [history, setHistory] = useState<{text: string, emotion?: any}[]>([]);
   const [interim, setInterim] = useState('');
-  const [response, setResponse] = useState('听起来今天有些疲惫，能告诉我是什么让您累了吗?');
+  
+  const { response, fetchReply, reset: resetLLM } = useLLM();
 
   const { start, stop, status, isRecording, analyser } = useASR({
     onTranscript: (text, isFinal, emotion) => {
       if (isFinal) {
         setHistory(prev => [...prev, { text, emotion }]);
         setInterim('');
+        // STEP 3: Call LLM Service for psychological response
+        fetchReply(text, emotion);
       } else {
         setInterim(text);
       }
@@ -31,6 +35,7 @@ export default function HomeScreen() {
     } else {
       setHistory([]);
       setInterim('');
+      resetLLM();
       start();
     }
   };

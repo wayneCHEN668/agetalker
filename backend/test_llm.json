@@ -1,0 +1,11 @@
+{
+  "text": "你好",
+  "emotion": {
+    "label": "neutral",
+    "label_zh": "平静",
+    "score": 1.0,
+    "valence": 0.5,
+    "arousal": 0.2
+  },
+  "session_id": "test_curl"
+}

@@ -73,10 +73,7 @@ const styles = StyleSheet.create({
     alignSelf: 'flex-start',
     maxWidth: '85%',
     // Subtle shadow for premium feel
-    shadowColor: '#000',
-    shadowOffset: { width: 0, height: 1 },
-    shadowOpacity: 0.05,
-    shadowRadius: 2,
+    boxShadow: '0px 1px 2px rgba(0, 0, 0, 0.05)',
     elevation: 2,
   },
   interimBubble: {
