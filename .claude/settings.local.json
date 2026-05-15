@@ -1,0 +1,12 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(findstr /v \"\\\\.venv\")",
+      "Bash(dir D:\\\\MyPrograms\\\\zht\\\\agetalker\\\\mobile /s /b)",
+      "Bash(findstr /v \"node_modules\")",
+      "Bash(findstr /v \"\\\\.vscode\")",
+      "Bash(dir D:\\\\MyPrograms\\\\zht\\\\agetalker\\\\doc /s /b)",
+      "Bash(.venv/Scripts/activate)"
+    ]
+  }
+}

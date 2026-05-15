@@ -5,10 +5,8 @@ from fastapi import FastAPI
 from services.asr_service import ASRService
 from services.emotion_service import EmotionService
 from services.llm_service import LLMService
-from services.tts_service import TTSService
 import routers.ws_asr as ws_asr_router
 import routers.sse_llm as sse_llm_router
-import routers.stream_tts as stream_tts_router
 from dotenv import load_dotenv
 
 load_dotenv()
@@ -29,14 +27,12 @@ async def lifespan(app: FastAPI):
     asr_svc = ASRService()
     emotion_svc = EmotionService()
     llm_svc = LLMService()
-    tts_svc = TTSService()
     
     # 2. Inject Services into Routers
     ws_asr_router.asr_service = asr_svc
     ws_asr_router.emotion_service = emotion_svc
     
     sse_llm_router.llm_service = llm_svc
-    stream_tts_router.tts_service = tts_svc
     
     # 3. Warm up models (optional but recommended)
     logger.info("Warming up models...")
@@ -69,7 +65,6 @@ app.add_middleware(
 # Mount Routers
 app.include_router(ws_asr_router.router)
 app.include_router(sse_llm_router.router)
-app.include_router(stream_tts_router.router)
 
 @app.get("/health")
 async def health_check():

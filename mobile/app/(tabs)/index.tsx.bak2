@@ -1,4 +1,4 @@
-import React, { useState, useCallback } from 'react';
+import React, { useState } from 'react';
 import { StyleSheet, View, SafeAreaView } from 'react-native';
 import { Design } from '@/constants/Design';
 import { StatusBar } from '@/components/StatusBar';
@@ -9,38 +9,23 @@ import { ActionButton } from '@/components/ActionButton';
 
 import { useASR } from '@/hooks/useASR';
 import { useLLM } from '@/hooks/useLLM';
-import { useTTS } from '@/hooks/useTTS';
 
 export default function HomeScreen() {
   const [history, setHistory] = useState<{text: string, emotion?: any}[]>([]);
   const [interim, setInterim] = useState('');
   const [currentEmotion, setCurrentEmotion] = useState('neutral');
   
-  // 1. Initialize TTS
-  const { speak, stop: stopTTS } = useTTS();
+  const { response, fetchReply, reset: resetLLM } = useLLM();
 
-  // 2. Initialize LLM with onSentence callback for parallel TTS
-  const { response, fetchReply, reset: resetLLM } = useLLM({
-    onSentence: (sentence, emotion) => {
-      console.log('[HomeScreen] Triggering TTS for sentence:', sentence);
-      // emotion might be the full object or label, use .label if it's an object
-      const label = typeof emotion === 'string' ? emotion : (emotion?.label || 'neutral');
-      speak(sentence, label);
-    }
-  });
-
-  // 3. Initialize ASR with echo cancellation (events handled internally in hook)
-  const { start, stop: stopASR, status, isRecording, analyser } = useASR({
+  const { start, stop, status, isRecording, analyser } = useASR({
     onTranscript: (text, isFinal, emotion) => {
       if (isFinal) {
         setHistory(prev => [...prev, { text, emotion }]);
         setInterim('');
-        
-        const emotionLabel = emotion?.label || 'neutral';
-        setCurrentEmotion(emotionLabel);
-        
-        // STEP 4: Call LLM with parallel sentence processing
-        // Now passing the full emotion object instead of just the label string
+        if (emotion?.label) {
+          setCurrentEmotion(emotion.label);
+        }
+        // STEP 3: Call LLM Service for psychological response
         fetchReply(text, emotion);
       } else {
         setInterim(text);
@@ -50,14 +35,12 @@ export default function HomeScreen() {
 
   const toggleConversation = () => {
     if (isRecording) {
-      stopASR();
-      stopTTS();
+      stop();
     } else {
       setHistory([]);
       setInterim('');
       setCurrentEmotion('neutral');
       resetLLM();
-      stopTTS(); // Ensure any residual audio is killed
       start();
     }
   };

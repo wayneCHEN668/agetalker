@@ -10,11 +10,6 @@ interface UseASROptions {
 export const useASR = ({ onTranscript, onStatusChange, wsUrl = 'ws://localhost:8050/ws/asr' }: UseASROptions) => {
   const [status, setStatus] = useState<'idle' | 'listening' | 'processing'>('idle');
   const [isRecording, setIsRecording] = useState(false);
-  
-  // Ref for echo cancellation state
-  const isTTSMutedRef = useRef(false);
-  const unmuteTimeoutRef = useRef<NodeJS.Timeout | null>(null);
-
   const wsRef = useRef<WebSocket | null>(null);
   const audioContextRef = useRef<AudioContext | null>(null);
   const analyserRef = useRef<AnalyserNode | null>(null);
@@ -104,9 +99,6 @@ export const useASR = ({ onTranscript, onStatusChange, wsUrl = 'ws://localhost:8
       processorRef.current = processor;
 
       processor.onaudioprocess = (e) => {
-        // Echo Cancellation check
-        if (isTTSMutedRef.current) return;
-
         if (wsRef.current?.readyState === WebSocket.OPEN) {
           const inputData = e.inputBuffer.getChannelData(0);
           // Convert Float32 to Int16
@@ -127,36 +119,6 @@ export const useASR = ({ onTranscript, onStatusChange, wsUrl = 'ws://localhost:8
       stop();
     }
   }, [onStatusChange, onTranscript, stop, wsUrl]);
-
-  // Setup Global Event Listeners for TTS Echo Cancellation
-  useEffect(() => {
-    const handleTTSStart = () => {
-      isTTSMutedRef.current = true;
-      if (unmuteTimeoutRef.current) {
-        clearTimeout(unmuteTimeoutRef.current);
-        unmuteTimeoutRef.current = null;
-      }
-      console.log('[useASR] Muted (TTS Active)');
-    };
-
-    const handleTTSEnd = () => {
-      // 200ms delay to allow room reverb to dissipate
-      unmuteTimeoutRef.current = setTimeout(() => {
-        isTTSMutedRef.current = false;
-        unmuteTimeoutRef.current = null;
-        console.log('[useASR] Unmuted (200ms Delay Passed)');
-      }, 200);
-    };
-
-    window.addEventListener('tts-start', handleTTSStart);
-    window.addEventListener('tts-end', handleTTSEnd);
-
-    return () => {
-      window.removeEventListener('tts-start', handleTTSStart);
-      window.removeEventListener('tts-end', handleTTSEnd);
-      if (unmuteTimeoutRef.current) clearTimeout(unmuteTimeoutRef.current);
-    };
-  }, []);
 
   useEffect(() => {
     return () => stop();
