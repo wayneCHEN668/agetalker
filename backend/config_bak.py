@@ -85,45 +85,18 @@ LABEL_NORMALIZE_MAP = {
     'neutral': 'neutral',
 }
 
-# ── Qwen API (STEP 3，主生成模型) ─────────────────────────────────────────────
+# ── Qwen API (STEP 3) ────────────────────────────────────────────────────────
 DASHSCOPE_API_KEY = os.getenv('DASHSCOPE_API_KEY', '')
 QWEN_BASE_URL     = os.getenv('DASHSCOPE_BASE_URL', 'https://dashscope.aliyuncs.com/compatible-mode/v1')
 
 # 模型选择：qwen-turbo（开发调试）/ qwen-plus（生产推荐）/ qwen-max（最高质量）
 QWEN_MODEL        = os.getenv('QWEN_MODEL', 'qwen-plus')
 
-# ── DeepSeek API（轻量路由 / 心理类别分类专用，OpenAI 兼容接口）────────────────
-# 路由调用（判断心理类别）追求低延迟和低成本而非创造性，用专门的小/快模型替代 Qwen，
-# 通过独立的客户端（见 llm_service.LLMService.router_client）与主生成调用完全分离，
-# 两者互不阻塞、互不影响——其中一个变慢或失败都不会拖累另一个。
-DEEPSEEK_API_KEY  = os.getenv('DEEPSEEK_API_KEY', '')
-DEEPSEEK_BASE_URL = os.getenv('DEEPSEEK_BASE_URL', 'https://api.deepseek.com')
-
-# deepseek-chat / deepseek-reasoner 是 legacy 别名，官方文档已标注将于 2026-07-24 停用
-# （当前指向 deepseek-v4-flash 的非思考模式），直接用显式模型 ID，免得临到弃用日期前
-# 措手不及。deepseek-v4-flash 本身就是官方推荐用于路由/分类/抽取这类高频轻量任务的模型，
-# 跟我们这里的用途正好匹配。
-DEEPSEEK_MODEL    = os.getenv('DEEPSEEK_MODEL', 'deepseek-v4-flash')
-
-if DEEPSEEK_API_KEY:
-    print(f"DEBUG: DEEPSEEK_API_KEY loaded (length: {len(DEEPSEEK_API_KEY)})")
-else:
-    print("DEBUG: DEEPSEEK_API_KEY NOT found in environment（路由调用会在请求时报错并自动降级为 neutral，不影响服务启动）")
-
-# ── LLM Generation Parameters（主生成调用，Qwen）──────────────────────────────
+# ── LLM Generation Parameters ────────────────────────────────────────────────
 LLM_MAX_TOKENS        = 256    # 单次最大生成 token 数（约 170 个中文字）
 LLM_TEMPERATURE       = 0.75   # 适度创造性，避免重复
 LLM_TOP_P             = 0.90
 LLM_MAX_HISTORY_TURNS = 6      # 保留最近 N 轮对话（= N*2 条消息）
-
-# ── 路由调用参数（独立于主生成调用，追求低延迟而非创造性）─────────────────────
-ROUTER_TEMPERATURE   = 0.1   # 低温度：分类任务要稳定，不需要创造性
-ROUTER_MAX_TOKENS    = 250    # 路由只需输出一个简短 JSON，不需要太大预算
-ROUTER_CONTEXT_TURNS = 2     # 传入路由 prompt 的最近对话轮数（1 轮 = 1 条 user + 1 条 assistant）
-
-# DeepSeek API 额外参数（通过 extra_body 传入，对非 DeepSeek 后端无影响）
-# 禁用思考链以压低延迟——路由调用要的是分类结果，不需要推理过程。
-ROUTER_EXTRA_BODY = {'thinking': {'type': 'disabled'}}
 
 # ── Crisis Detection ─────────────────────────────────────────────────────────
 CRISIS_KEYWORDS = [

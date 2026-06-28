@@ -47,28 +47,6 @@ v2 -> v3 变更记录（本次新增：策略在多轮间延续）
 - build_normal_prompt() 新增 strategy_id 参数；NORMAL_SYSTEM_PROMPT 的 R-Respond
   步骤从"把整个策略菜单交给生成 LLM 自己挑"变成"直接告诉它这一轮该用哪一条"，
   生成 LLM 只负责把这一条策略自然地说出来，不再需要自己做选择决策。
-
-v3 -> v4 变更记录（本次新增：类别延续判定，解决"叙事中间的中性句被误判脱离原类别"）
-------------------------------------------------------------------------------
-真实案例：老人说"隔壁王老头走了"（判为 grief，正确），下一句"我跟他当邻居五十年
-了，他是个好人"（被误判为 neutral）——这句话单独看确实是字面中性的事实陈述，但
-它明显是同一段悼念叙事的延续，误判直接导致哀伤类别的红线（不能说"时间会治愈一
-切"之类的话）在这一轮失效。
-
-排查后发现根因不是"context 没传"（context 确实传了），而是路由 prompt 里从来没
-有显式告诉模型"应该怎么利用这段上下文判断延续性"——模型拿到原始对话文本，仍然
-可能逐句独立判断，原始文本本身不会自动产生"这是同一段叙事"的判断倾向。
-
-解决方案（没有新增信号轴，没有用声学情绪去校正语义类别——那是两个独立的轴，
-混用会引入新的错误）：
-- ROUTER_SYSTEM_PROMPT 新增"类别延续判定"规则，作为优先于信号匹配规则的第一步：
-  如果当前这句话是同一段叙事的延续，即使字面中性也维持上一轮类别；只有明确换
-  话题或情绪确实平复了才重新判断。
-- 这个判定规则是不对称的：从中性"进入"敏感类别（depression/anxiety/anger/
-  loneliness/grief）门槛不变；从敏感类别"退出"回到中性/积极，需要更明确的信号——
-  错误地提前退出，代价（红线保护失效）比"多停留一轮"严重得多。
-- build_router_user_prompt() 新增 last_category 参数，把会话级的"上一轮判定类别"
-  显式传给路由模型，而不是只依赖它从原始对话文本里自己反推。
 """
 
 # --------------------------------------------------------------------------- #
@@ -146,7 +124,7 @@ CATEGORY_STRATEGY_MAP = {
             {'id': 'emotion_mirror', 'name': '情绪镜像',
              'desc': '用平和的语气重述他的核心诉求，让他知道你听懂了'},
             {'id': 'revisit_past', 'name': '重温往昔',
-             'desc': '用提问引导他聊聊过去类似的经历，让他自己说，不要替他编'},
+             'desc': '顺着他的话，引导聊聊过去类似的经历'},
         ],
         'specific_instructions': (
             '先让他把话说完，等语气缓一点了再问：「是啥事儿把你气成这样？」'
@@ -162,9 +140,9 @@ CATEGORY_STRATEGY_MAP = {
         ),
         'strategies': [
             {'id': 'sensory_trigger', 'name': '感官触发',
-             'desc': '问问他有没有想起什么老歌、旧物、老味道，让他自己说是什么，别替他编具体是哪个'},
+             'desc': '用老歌、旧物、老味道当引子'},
             {'id': 'open_validation', 'name': '开放引导与情感验证',
-             'desc': '基于他已经说过的事情，真诚地夸夸他的经历或品性，不要编他没提过的事'},
+             'desc': '真诚地夸夸他经历过的事或他的品性'},
             {'id': 'redirect_difficult_emotion', 'name': '困难情绪重定向',
              'desc': '先接住情绪，再慢慢转向相关的、轻松一点的话题'},
             {'id': 'cognitive_activation', 'name': '认知激活',
@@ -240,14 +218,6 @@ CATEGORY_STRATEGY_MAP = {
 }
 
 
-# Precomputed strategy-id valid sets — built once at import time rather than
-# reconstructed on every resolve_strategy_id() call (which runs on every LLM request).
-_STRATEGY_ID_SETS: dict[str, set[str]] = {
-    cat: {s['id'] for s in cfg['strategies']}
-    for cat, cfg in CATEGORY_STRATEGY_MAP.items()
-}
-
-
 def resolve_strategy_id(category: str, strategy_id: str) -> str:
     """
     校验/兜底某个 category 的 strategy_id。
@@ -260,7 +230,7 @@ def resolve_strategy_id(category: str, strategy_id: str) -> str:
     注入到 system prompt 里的那个 id，不能是路由模型原始返回的、可能无效的值。
     """
     cat_cfg = CATEGORY_STRATEGY_MAP.get(category) or CATEGORY_STRATEGY_MAP['neutral']
-    valid_ids = _STRATEGY_ID_SETS.get(category, _STRATEGY_ID_SETS['neutral'])
+    valid_ids = {s['id'] for s in cat_cfg['strategies']}
     if strategy_id in valid_ids:
         return strategy_id
     return cat_cfg['strategies'][0]['id']
@@ -296,31 +266,6 @@ def _build_strategy_menu_section() -> str:
 _ROUTER_BASE_PROMPT = """\
 你是老年人情绪陪伴系统的"心理类别与策略路由"模块，要在不拖慢实时对话的前提下，
 快速判断老年人这句话属于哪个心理类别，并选出这一轮该用哪一条具体策略。
-
-## 类别延续判定（先判断这一步，优先于下面的信号匹配规则）
-
-先看"上一轮判定的类别"和"最近对话上下文"：如果当前这句话是同一段叙事/同一个话题的
-延续（比如还在讲述同一个人、同一段记忆、同一件事的细节），即使这句话单独看语义偏
-中性（比如只是在说具体的时间、地点、人物关系这类事实细节，没有"难过""伤心"这类
-词），也应该维持上一轮的类别，不要因为这一句单独看起来"中性"就改判——人在讲述一件
-伤心事的过程中，中间穿插事实性的陈述句是正常的，不代表情绪已经过去了。
-
-但如果对方明显换了话题、谈及不相关的新内容，应该按新内容重新判断，不要不合理地
-"粘"在旧类别上不放。
-
-类别之间的转换不是对称的：
-- 从中性/闲聊"进入" depression / anxiety / anger / loneliness / grief 这几个类别，
-  门槛和平时一样，这句话本身有对应信号就可以判定。
-- 从 depression / anxiety / anger / loneliness / grief 这几个类别"退出"回到
-  neutral 或 positive，需要更明确的信号才行——比如对方明确表达"想通了""算是看开
-  了"、主动转换到完全不相关的新话题、或者连续几句内容都显示情绪确实平复了，而
-  不能仅凭这一句话字面上"看起来中性"就退出。
-  这是有意设计成不对称的：错误地提前退出一个还在进行的悲伤/抑郁叙事，会让对话
-  失去本该有的红线保护（比如哀伤类别不能说"时间会治愈一切"），后果比"多停留一轮"
-  严重得多。
-
-如果是因为延续叙事而维持了类别（不是这句话自己的信号判出来的），matched_signals
-里可以写"延续上文XX叙事"这类说明，方便排查。
 
 ## 路由规则（信号匹配到任意一条即归类；crisis 优先级最高，一旦命中其他规则全部失效）
 
@@ -369,7 +314,6 @@ ROUTER_SYSTEM_PROMPT = _ROUTER_BASE_PROMPT + '\n' + _build_strategy_menu_section
 def build_router_user_prompt(
     text: str,
     conversation_context: str = "",
-    last_category: str = "",
     used_strategies: str = "",
 ) -> str:
     """
@@ -380,27 +324,18 @@ def build_router_user_prompt(
         conversation_context: 可选，最近几轮对话的简要上下文（由调用方的
             _build_router_context 之类的逻辑构建），用于消除单句歧义。
             为空时路由仅基于当前这句话判断。
-        last_category: 可选，上一轮判定的心理类别（由调用方维护的会话级状态
-            提供）。这是解决"叙事中间的中性陈述句被误判为脱离原类别"问题的
-            关键信号——只给原始对话文本（conversation_context）不够，因为模型
-            仍然可能逐句独立判断；显式告诉它"上一轮在哪个类别"，配合
-            ROUTER_SYSTEM_PROMPT 里的"类别延续判定"规则，才能让它正确地把
-            一句字面中性的话识别成"同一段叙事的延续"而不是"话题已经结束"。
-            为空时（比如会话第一句话）不传这个信号。
         used_strategies: 可选，这个会话里各类别已用过的策略 id（由调用方维护
             的会话级状态构建），供路由模型参考"该不该推进到下一步"。
             不是必须避开的黑名单，为空时路由不参考历史，直接按当前内容判断。
     """
     context_block = f"\n最近对话上下文：{conversation_context}" if conversation_context else ""
-    last_category_block = f"\n上一轮判定的类别：{last_category}" if last_category else ""
     used_block = (
         f"\n各类别已用过的策略（参考用，不是必须避开，结合对话内容判断要不要换）：{used_strategies}"
         if used_strategies else ""
     )
     return (
-        f"老年人话语：「{text}」{context_block}{last_category_block}{used_block}\n\n"
-        f"请先判断这句话是不是上一轮话题/叙事的延续，再判断心理类别、是否危机，"
-        f"并选一个最合适当下这句话的策略，输出 JSON。"
+        f"老年人话语：「{text}」{context_block}{used_block}\n\n"
+        f"请判断心理类别、是否危机，并选一个最合适当下这句话的策略，输出 JSON。"
     )
 
 
@@ -427,20 +362,6 @@ NORMAL_SYSTEM_PROMPT = """\
 
 ## 底层红线（绝对不能违反，优先级高于下面所有策略和说话风格）
 {forbidden}
-
-## 事实红线（不分类别，任何时候都适用，优先级和上面的底层红线一样高）
-不能编造对方没说过的具体情节、细节或事实——包括对方提到的人（比如老王、老伴）
-做过什么事、发生过什么、具体是什么样子。哪怕是想顺着话题往下聊、想显得更投入，
-也不能自己"讲述"一段对方没说过的往事，只能基于对方已经说出来的内容去回应。
-
-陈述句只能复述、呼应、或概括对方已经说过的内容，不能新增对方没提过的具体事实。
-如果想让对方多说点、或者好奇某个细节，只能用提问的方式邀请对方自己讲，不能自己
-先编一个版本说出来——提问可以带一点猜测的语气（比如"是不是…"），陈述句不行。
-
-举例：
-- 不好的回应（编造了对方没说过的细节）："老王那时候身体不好，没少往医院跑吧。"
-- 好的回应（只回应已说内容，不新增事实）："五十年的邻居情分，搬都搬不走啊。"
-- 好的回应（用提问邀请对方自己说，不是自己编）："你们俩还有啥让你印象特别深的事儿啊？"
 
 ## CARE 回复框架（每次回复必须遵循下面四步，自然衔接，不要分段编号）
 1. C-Connect 连接：用 1 句话接住对方，建立情感连接（≤ 10字）

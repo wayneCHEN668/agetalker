@@ -1,6 +1,7 @@
 import React, { useState, useCallback } from 'react';
 import { StyleSheet, View, SafeAreaView } from 'react-native';
 import { Design } from '@/constants/Design';
+import { CATEGORY_ZH_MAP } from '@/constants/Category';
 import { StatusBar } from '@/components/StatusBar';
 import { TranscriptArea } from '@/components/TranscriptArea';
 import { Waveform } from '@/components/Waveform';
@@ -12,7 +13,9 @@ import { useLLM } from '@/hooks/useLLM';
 import { useTTS } from '@/hooks/useTTS';
 
 export default function HomeScreen() {
-  const [history, setHistory] = useState<{text: string, emotion?: any}[]>([]);
+  const [history, setHistory] = useState<
+    {text: string; emotion?: any; category_zh?: string}[]
+  >([]);
   const [interim, setInterim] = useState('');
   const [currentEmotion, setCurrentEmotion] = useState('neutral');
   
@@ -20,12 +23,25 @@ export default function HomeScreen() {
   const { speak, stop: stopTTS } = useTTS();
 
   // 2. Initialize LLM with onSentence callback for parallel TTS
-  const { response, fetchReply, reset: resetLLM } = useLLM({
-    onSentence: (sentence, emotion) => {
-      console.log('[HomeScreen] Triggering TTS for sentence:', sentence);
-      // emotion might be the full object or label, use .label if it's an object
-      const label = typeof emotion === 'string' ? emotion : (emotion?.label || 'neutral');
-      speak(sentence, label);
+  // ttsParams and category come from the backend LLM done event (semantic-driven)
+  const { response, fetchReply, reset: resetLLM, strategyName } = useLLM({
+    onSentence: (sentence, ttsParams, category) => {
+      console.log('[HomeScreen] Triggering TTS for sentence:', sentence, category);
+      speak(sentence, ttsParams, category);
+
+      // Surface the psychological category in the last transcript bubble.
+      // The conversation is strictly sequential — the last history item is always
+      // the user utterance that triggered this LLM call.
+      const zh = CATEGORY_ZH_MAP[category] || category;
+      setHistory(prev => {
+        if (prev.length === 0) return prev;
+        const updated = [...prev];
+        updated[updated.length - 1] = {
+          ...updated[updated.length - 1],
+          category_zh: zh,
+        };
+        return updated;
+      });
     }
   });
 
@@ -79,7 +95,7 @@ export default function HomeScreen() {
           />
         </View>
         
-        <ResponseArea response={response} />
+        <ResponseArea response={response} strategyName={strategyName} />
       </View>
       
       <ActionButton 

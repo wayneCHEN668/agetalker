@@ -21,7 +21,6 @@ from config import (
     ROUTER_TEMPERATURE,
     ROUTER_MAX_TOKENS,
     ROUTER_CONTEXT_TURNS,
-    ROUTER_EXTRA_BODY,
 )
 from prompts.templates import (
     build_normal_prompt,
@@ -59,15 +58,6 @@ class LLMService:
     - 记录到 strategy_history 里的，是 resolve_strategy_id() 兜底之后真正会被
       注入到 system prompt 里的 id，不是路由模型原始返回的、可能无效的值——
       这样"已用策略"的记录才是可信的，不会出现追踪失真。
-
-    v4 -> v5 变更（类别延续判定，解决"叙事中间的中性句被误判脱离原类别"）：
-    - 新增 self.last_category：{session_id: 上一轮判定的 category}，与
-      self.strategy_history 平级维护。危机轮不更新这个值——危机结束后恢复
-      正常对话，应该参考的是危机发生前的类别，不是 "crisis" 本身。
-    - _route_category() 新增 last_category 参数，转发给 build_router_user_prompt，
-      配合 ROUTER_SYSTEM_PROMPT 里新增的"类别延续判定"规则（不对称：进入敏感
-      类别门槛不变，退出敏感类别需要更明确的信号），让路由模型正确把一句字面
-      中性的话识别成"同一段叙事的延续"，而不是逐句独立判断导致中途误判成 neutral。
     """
 
     def __init__(self):
@@ -84,10 +74,7 @@ class LLMService:
         self.sessions: dict[str, list[dict]] = {}
         # 策略延续状态：{session_id: {category: [已用 strategy_id, ...]}}
         self.strategy_history: dict[str, dict[str, list[str]]] = {}
-        # 类别延续状态：{session_id: 上一轮判定的 category}（crisis 轮不更新这个值，
-        # 危机结束后恢复正常对话时，应该参考的是危机发生前的类别，不是 "crisis" 本身）
-        self.last_category: dict[str, str] = {}
-        logger.info("LLM 服务初始化完成 ✅ (生成: Qwen/AsyncOpenAI | 路由: DeepSeek/AsyncOpenAI | 策略延续: 已启用 | 类别延续: 已启用)")
+        logger.info("LLM 服务初始化完成 ✅ (生成: Qwen/AsyncOpenAI | 路由: DeepSeek/AsyncOpenAI | 策略延续: 已启用)")
 
     # ─── 路由 LLM ───────────────────────────────────────────────────────────
 
@@ -95,7 +82,6 @@ class LLMService:
         self,
         user_text: str,
         context: str = "",
-        last_category: str = "",
         used_strategies: str = "",
     ) -> tuple[str, str, str]:
         """
@@ -112,11 +98,6 @@ class LLMService:
         Args:
             user_text: 当前这句话。
             context: 最近几轮对话拼成的上下文（由 _build_router_context 构建）。
-            last_category: 上一轮判定的心理类别（由 self.last_category 提供）。
-                解决"叙事中间的中性陈述句被误判为脱离原类别"的问题——只给原始
-                对话文本不够，模型仍可能逐句独立判断，必须显式告诉它"上一轮
-                判的是什么"，配合 ROUTER_SYSTEM_PROMPT 里的"类别延续判定"规则，
-                才能让它正确识别"同一段叙事的延续"。
             used_strategies: 这个会话里各类别已用过的策略 id（由 _format_used_strategies
                 构建），供路由模型参考"该不该推进到下一步"，不是必须避开的黑名单。
 
@@ -132,16 +113,12 @@ class LLMService:
                 messages    = [
                     {'role': 'system', 'content': ROUTER_SYSTEM_PROMPT},
                     {'role': 'user',   'content': build_router_user_prompt(
-                        user_text,
-                        conversation_context=context,
-                        last_category=last_category,
-                        used_strategies=used_strategies,
+                        user_text, context, used_strategies
                     )},
                 ],
                 temperature = ROUTER_TEMPERATURE,
                 max_tokens  = ROUTER_MAX_TOKENS,
                 response_format = {'type': 'json_object'},
-                extra_body  = ROUTER_EXTRA_BODY,
             )
             raw = resp.choices[0].message.content
             if not raw:
@@ -220,7 +197,7 @@ class LLMService:
         per_session = self.strategy_history.setdefault(session_id, {})
         used = per_session.setdefault(category, [])
         used.append(strategy_id)
-        used[:] = used[-_MAX_STRATEGY_HISTORY_PER_CATEGORY:]
+        per_session[category] = used[-_MAX_STRATEGY_HISTORY_PER_CATEGORY:]
 
     # ─── 主入口：流式生成回复 ────────────────────────────────────────────────
 
@@ -263,7 +240,6 @@ class LLMService:
         category = 'neutral'      # 默认值（危机被拦截、或路由失败兜底时使用）
         matched_signals = ''
         strategy_id = ''
-        strategy_name = ''
         crisis = self._check_crisis(user_text)
         if crisis:
             logger.warning(f"⚠️  危机信号触发 (关键词) | Session: {session_id} | 文本: {user_text[:50]}")
@@ -273,9 +249,8 @@ class LLMService:
         if not crisis:
             context = self._build_router_context(conversation, ROUTER_CONTEXT_TURNS)
             used_strategies = self._format_used_strategies(session_id)
-            last_category = self.last_category.get(session_id, '')
             category, matched_signals, raw_strategy_id = await self._route_category(
-                user_text, context, last_category, used_strategies
+                user_text, context, used_strategies
             )
             if category == 'crisis':
                 crisis = True
@@ -287,17 +262,6 @@ class LLMService:
                 # 兜底校验，记录的必须是这个最终生效的值，不是路由原始返回值
                 strategy_id = resolve_strategy_id(category, raw_strategy_id)
                 self._record_strategy_use(session_id, category, strategy_id)
-                # 查找策略中文名（供前端展示，避免前端再维护一份策略名称映射）
-                _cat_cfg = CATEGORY_STRATEGY_MAP.get(category, CATEGORY_STRATEGY_MAP['neutral'])
-                _strategy = next(
-                    (s for s in _cat_cfg['strategies'] if s['id'] == strategy_id),
-                    _cat_cfg['strategies'][0],
-                )
-                strategy_name = _strategy['name']
-                # 危机轮不更新 last_category：危机结束后恢复正常对话，应该参考的是
-                # 危机发生前的类别，不是 "crisis" 本身（crisis 也不在 CATEGORY_STRATEGY_MAP
-                # 里，传给路由当 last_category 它也认不出来）
-                self.last_category[session_id] = category
 
         # ── 步骤 4：构建 System Prompt ──────────────────────────────────────
         if crisis:
@@ -355,13 +319,12 @@ class LLMService:
 
         # ── 步骤 11：生成完毕信号 ─────────────────────────────────────────────
         yield {
-            'type':          'done',
-            'full_text':     full_reply,
-            'crisis':        crisis,
-            'category':      category if not crisis else 'crisis',
-            'strategy_id':   strategy_id,
-            'strategy_name': strategy_name,
-            'tts_params':    self._get_tts_params_by_category(category, crisis),
+            'type':         'done',
+            'full_text':    full_reply,
+            'crisis':       crisis,
+            'category':     category if not crisis else 'crisis',
+            'strategy_id':  strategy_id,
+            'tts_params':   self._get_tts_params_by_category(category, crisis),
         }
 
     # ─── 危机检测 ───────────────────────────────────────────────────────────
@@ -415,14 +378,13 @@ class LLMService:
     # ─── 会话管理 ────────────────────────────────────────────────────────────
 
     def reset(self, session_id: str = 'default'):
-        """重置指定会话的对话历史、策略延续状态和类别延续状态。"""
+        """重置指定会话的对话历史和策略延续状态。"""
         had_session = session_id in self.sessions
         if had_session:
             self.sessions[session_id].clear()
         self.strategy_history.pop(session_id, None)
-        self.last_category.pop(session_id, None)
         if had_session:
-            logger.info(f"会话 {session_id} 历史与延续状态已重置")
+            logger.info(f"会话 {session_id} 历史与策略状态已重置")
         else:
             logger.info(f"会话 {session_id} 不存在，无需重置")
 

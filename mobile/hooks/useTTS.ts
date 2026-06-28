@@ -1,7 +1,13 @@
 import { useState, useCallback, useRef } from 'react';
-import { TTS_CONFIG, TTS_PARAMS_MAP, DEFAULT_TTS_PARAMS } from '../constants/TTS';
+import { TTS_CONFIG, TTSParams } from '../constants/TTS';
 
-export interface UseTTSOptions {
+interface QueueItem {
+  text: string;
+  ttsParams: TTSParams;
+  emotionLabel: string;
+}
+
+interface UseTTSOptions {
   apiBase?: string;
   onPlaybackDone?: () => void;
 }
@@ -13,9 +19,9 @@ export const useTTS = (options: UseTTSOptions = {}) => {
   // WebAudio refs
   const audioCtxRef = useRef<AudioContext | null>(null);
   const nextStartTimeRef = useRef<number>(0);
-  
+
   // Queue state
-  const playQueueRef = useRef<{ text: string; emotion: string }[]>([]);
+  const playQueueRef = useRef<QueueItem[]>([]);
   const isProcessingRef = useRef(false);
 
   /**
@@ -35,11 +41,11 @@ export const useTTS = (options: UseTTSOptions = {}) => {
   }, []);
 
   /**
-   * Play a single sentence by fetching PCM stream
+   * Play a single sentence by fetching PCM stream.
+   * Uses backend-computed ttsParams directly (single source of truth).
    */
-  const playOnce = async (text: string, emotion: string) => {
+  const playOnce = async (text: string, ttsParams: TTSParams, emotionLabel: string) => {
     const ctx = initAudio();
-    const params = TTS_PARAMS_MAP[emotion] || DEFAULT_TTS_PARAMS;
 
     try {
       const response = await fetch(`${apiBase}/tts/stream`, {
@@ -47,10 +53,10 @@ export const useTTS = (options: UseTTSOptions = {}) => {
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
           text,
-          speed: params.speed,
-          pitch: params.pitch,
-          style: params.style,
-          emotion_label: emotion,
+          speed: ttsParams.speed,
+          pitch: ttsParams.pitch,
+          style: ttsParams.style,
+          emotion_label: emotionLabel,
         }),
       });
 
@@ -59,9 +65,7 @@ export const useTTS = (options: UseTTSOptions = {}) => {
       }
 
       const reader = response.body.getReader();
-      
-      // We read chunks and decode them as Int16 PCM
-      // Note: For simplicity and low latency, we schedule small chunks immediately
+
       while (true) {
         const { done, value } = await reader.read();
         if (done) break;
@@ -82,13 +86,12 @@ export const useTTS = (options: UseTTSOptions = {}) => {
         source.buffer = audioBuffer;
         source.connect(ctx.destination);
 
-        // Calculate timing to ensure seamless stitching
         const startTime = Math.max(ctx.currentTime, nextStartTimeRef.current);
         source.start(startTime);
         nextStartTimeRef.current = startTime + audioBuffer.duration;
       }
 
-      // Wait for the scheduled audio to finish before resolving this sentence
+      // Wait for the scheduled audio to finish
       const waitTime = (nextStartTimeRef.current - ctx.currentTime) * 1000;
       if (waitTime > 0) {
         await new Promise(resolve => setTimeout(resolve, waitTime));
@@ -107,28 +110,31 @@ export const useTTS = (options: UseTTSOptions = {}) => {
     isProcessingRef.current = true;
     setIsPlaying(true);
 
-    // Emit event to mute ASR
     window.dispatchEvent(new CustomEvent('tts-start'));
 
     while (playQueueRef.current.length > 0) {
       const item = playQueueRef.current.shift()!;
-      await playOnce(item.text, item.emotion);
+      await playOnce(item.text, item.ttsParams, item.emotionLabel);
     }
 
     isProcessingRef.current = false;
     setIsPlaying(false);
 
-    // Emit event to unmute ASR (ASR module will add the 200ms delay)
     window.dispatchEvent(new CustomEvent('tts-end'));
     onPlaybackDone?.();
   };
 
   /**
-   * Public API: Queue a sentence for speaking
+   * Public API: Queue a sentence for speaking.
+   * ttsParams comes from the backend LLM done event (single source of truth).
    */
-  const speak = useCallback((text: string, emotion: string = 'neutral') => {
+  const speak = useCallback((
+    text: string,
+    ttsParams: TTSParams = { speed: 1.0, pitch: 0, style: 'neutral' },
+    emotionLabel: string = 'neutral'
+  ) => {
     if (!text.trim()) return;
-    playQueueRef.current.push({ text, emotion });
+    playQueueRef.current.push({ text, ttsParams, emotionLabel });
     processQueue();
   }, []);
 

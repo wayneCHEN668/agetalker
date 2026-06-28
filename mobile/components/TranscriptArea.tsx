@@ -3,7 +3,7 @@ import { ScrollView, Text, StyleSheet, View } from 'react-native';
 import { Design } from '../constants/Design';
 
 interface TranscriptAreaProps {
-  history: { text: string, emotion?: any }[];
+  history: { text: string; emotion?: any; category_zh?: string }[];
   interim?: string;
 }
 
@@ -34,11 +34,18 @@ export const TranscriptArea: React.FC<TranscriptAreaProps> = ({ history, interim
             <Text style={styles.text}>
               {item.text}
             </Text>
-            {item.emotion?.label_zh && (
-              <View style={styles.emotionTag}>
-                <Text style={styles.emotionText}>感受：{item.emotion.label_zh}</Text>
-              </View>
-            )}
+            <View style={styles.tagRow}>
+              {item.emotion?.label_zh && (
+                <View style={styles.emotionTag}>
+                  <Text style={styles.emotionText}>感受：{item.emotion.label_zh}</Text>
+                </View>
+              )}
+              {item.category_zh && (
+                <View style={styles.categoryTag}>
+                  <Text style={styles.categoryText}>状态：{item.category_zh}</Text>
+                </View>
+              )}
+            </View>
           </View>
         ))}
         
@@ -96,9 +103,14 @@ const styles = StyleSheet.create({
   interimText: {
     color: Design.colors.text.secondary,
   },
-  emotionTag: {
+  tagRow: {
+    flexDirection: 'row',
+    flexWrap: 'wrap',
+    alignItems: 'center',
     marginTop: 8,
-    alignSelf: 'flex-start',
+    gap: 8,
+  },
+  emotionTag: {
     backgroundColor: 'rgba(74, 103, 65, 0.1)',
     paddingHorizontal: 10,
     paddingVertical: 4,
@@ -108,6 +120,19 @@ const styles = StyleSheet.create({
     fontSize: 14,
     color: Design.colors.primary,
     fontWeight: '600',
+  },
+  categoryTag: {
+    backgroundColor: 'rgba(74, 103, 65, 0.06)',
+    paddingHorizontal: 10,
+    paddingVertical: 3,
+    borderRadius: 8,
+    borderWidth: 0.5,
+    borderColor: 'rgba(74, 103, 65, 0.18)',
+  },
+  categoryText: {
+    fontSize: 13,
+    color: Design.colors.secondary,
+    fontWeight: '500',
   },
   placeholder: {
     fontFamily: Design.typography.fontFamily,

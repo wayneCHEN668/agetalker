@@ -37,9 +37,9 @@ async def stream_reply(req: LLMRequest):
     if llm_service is None:
         return {"error": "LLMService not initialized"}
 
-    def generate():
+    async def generate():
         try:
-            for chunk in llm_service.stream_reply(req.text, req.emotion, req.session_id):
+            async for chunk in llm_service.stream_reply(req.text, req.emotion, req.session_id):
                 # SSE 格式：每条消息 "data: <json>\n\n"
                 yield f"data: {json.dumps(chunk, ensure_ascii=False)}\n\n"
         except Exception as e:

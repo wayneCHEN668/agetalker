@@ -4,12 +4,20 @@ import { Design } from '../constants/Design';
 
 interface ResponseAreaProps {
   response: string;
+  strategyName?: string;
 }
 
-export const ResponseArea: React.FC<ResponseAreaProps> = ({ response }) => {
+export const ResponseArea: React.FC<ResponseAreaProps> = ({ response, strategyName }) => {
   return (
     <View style={styles.card}>
-      <Text style={styles.label}>智慧伙伴</Text>
+      <View style={styles.header}>
+        <Text style={styles.label}>智慧伙伴</Text>
+        {strategyName ? (
+          <View style={styles.strategyBadge}>
+            <Text style={styles.strategyText}>{strategyName}</Text>
+          </View>
+        ) : null}
+      </View>
       <ScrollView 
         contentContainerStyle={styles.content}
         showsVerticalScrollIndicator={false}
@@ -37,14 +45,31 @@ const styles = StyleSheet.create({
     borderWidth: 1,
     borderColor: 'rgba(74, 103, 65, 0.1)',
   },
+  header: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+    marginBottom: 12,
+  },
   label: {
     fontFamily: Design.typography.fontFamily,
     fontSize: Design.typography.label.fontSize,
     color: Design.colors.text.hint,
-    marginBottom: 12,
     fontWeight: '700',
     letterSpacing: 2,
-    textAlign: 'center',
+  },
+  strategyBadge: {
+    backgroundColor: 'rgba(74, 103, 65, 0.08)',
+    paddingHorizontal: 10,
+    paddingVertical: 3,
+    borderRadius: 8,
+    borderWidth: 0.5,
+    borderColor: 'rgba(74, 103, 65, 0.2)',
+  },
+  strategyText: {
+    fontSize: 12,
+    color: Design.colors.primary,
+    fontWeight: '600',
   },
   content: {
     flexGrow: 1,
