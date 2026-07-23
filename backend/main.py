@@ -38,11 +38,12 @@ async def lifespan(app: FastAPI):
     sse_llm_router.llm_service = llm_svc
     stream_tts_router.tts_service = tts_svc
     
-    # 3. Warm up models (optional but recommended)
+    # 3. Warm up models (only local backends need it)
     logger.info("Warming up models...")
-    dummy_audio = np.zeros(16000, dtype=np.float32)
-    asr_svc.transcribe(dummy_audio)
-    emotion_svc.analyze(dummy_audio, "warmup_session")
+    if asr_svc.needs_warmup():
+        dummy_audio = np.zeros(16000, dtype=np.float32)
+        asr_svc.warmup(dummy_audio)
+    emotion_svc.analyze(np.zeros(16000, dtype=np.float32), "warmup_session")
     
     logger.info("Services initialized and models warmed up ✅")
     yield

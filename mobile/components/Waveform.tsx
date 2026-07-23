@@ -7,27 +7,61 @@ interface WaveformProps {
   analyser?: AnalyserNode | null;
 }
 
+const BAR_COUNT = 7;
+
+const NativeBars: React.FC<{ isActive: boolean }> = ({ isActive }) => {
+  const anims = useRef(
+    [...Array(BAR_COUNT)].map(() => new Animated.Value(1)),
+  ).current;
+
+  useEffect(() => {
+    if (isActive) {
+      const loops = anims.map((anim, i) =>
+        Animated.loop(
+          Animated.sequence([
+            Animated.timing(anim, {
+              toValue: 1.6 + Math.sin(i * 0.8) * 0.4,
+              duration: 400 + i * 60,
+              useNativeDriver: true,
+            }),
+            Animated.timing(anim, {
+              toValue: 1,
+              duration: 400 + i * 60,
+              useNativeDriver: true,
+            }),
+          ]),
+        ),
+      );
+      loops.forEach((l) => l.start());
+      return () => loops.forEach((l) => l.stop());
+    } else {
+      anims.forEach((a) => a.setValue(1));
+    }
+  }, [isActive]);
+
+  return (
+    <View style={styles.barContainer}>
+      {anims.map((anim, i) => (
+        <Animated.View
+          key={i}
+          style={[
+            styles.bar,
+            {
+              height: 24 + (i % 3) * 12,
+              opacity: 0.45 + (i % 4) * 0.15,
+              transform: [{ scaleY: anim }],
+            },
+          ]}
+        />
+      ))}
+    </View>
+  );
+};
+
 export const Waveform: React.FC<WaveformProps> = ({ isActive, analyser }) => {
   const canvasRef = useRef<any>(null);
   const requestRef = useRef<number | null>(null);
   const [dimensions, setDimensions] = useState({ width: 0, height: 0 });
-  const anim = useRef(new Animated.Value(1)).current;
-
-  // Fallback animation for Native
-  useEffect(() => {
-    if (Platform.OS !== 'web') {
-      if (isActive) {
-        Animated.loop(
-          Animated.sequence([
-            Animated.timing(anim, { toValue: 2, duration: 500, useNativeDriver: true }),
-            Animated.timing(anim, { toValue: 1, duration: 500, useNativeDriver: true }),
-          ])
-        ).start();
-      } else {
-        anim.setValue(1);
-      }
-    }
-  }, [isActive]);
 
   const onLayout = (event: LayoutChangeEvent) => {
     const { width, height } = event.nativeEvent.layout;
@@ -35,7 +69,13 @@ export const Waveform: React.FC<WaveformProps> = ({ isActive, analyser }) => {
   };
 
   useEffect(() => {
-    if (Platform.OS !== 'web' || !isActive || !analyser || !canvasRef.current || dimensions.width === 0) {
+    if (
+      Platform.OS !== 'web' ||
+      !isActive ||
+      !analyser ||
+      !canvasRef.current ||
+      dimensions.width === 0
+    ) {
       if (requestRef.current) cancelAnimationFrame(requestRef.current);
       return;
     }
@@ -45,7 +85,6 @@ export const Waveform: React.FC<WaveformProps> = ({ isActive, analyser }) => {
     const bufferLength = analyser.frequencyBinCount;
     const dataArray = new Uint8Array(bufferLength);
 
-    // Set canvas internal resolution to match layout size
     canvas.width = dimensions.width;
     canvas.height = dimensions.height;
 
@@ -55,13 +94,12 @@ export const Waveform: React.FC<WaveformProps> = ({ isActive, analyser }) => {
 
       ctx.clearRect(0, 0, canvas.width, canvas.height);
 
-      // Gradient for the wave
+      // Warm Twilight gradient: dusty rose to warm amber
       const gradient = ctx.createLinearGradient(0, 0, canvas.width, 0);
       gradient.addColorStop(0, Design.colors.primary);
-      gradient.addColorStop(0.5, '#4FC3F7'); // Lighter blue
+      gradient.addColorStop(0.5, '#E8A838');
       gradient.addColorStop(1, Design.colors.primary);
 
-      // Draw two layers for depth
       const drawWave = (offset: number, alpha: number, lineWidth: number) => {
         ctx.beginPath();
         ctx.lineWidth = lineWidth;
@@ -70,8 +108,7 @@ export const Waveform: React.FC<WaveformProps> = ({ isActive, analyser }) => {
         ctx.lineCap = 'round';
         ctx.lineJoin = 'round';
 
-        // Glow effect
-        ctx.shadowBlur = isActive ? 15 : 0;
+        ctx.shadowBlur = isActive ? 12 : 0;
         ctx.shadowColor = Design.colors.primary;
 
         const sliceWidth = canvas.width / bufferLength;
@@ -86,17 +123,13 @@ export const Waveform: React.FC<WaveformProps> = ({ isActive, analyser }) => {
           } else {
             ctx.lineTo(x, y);
           }
-
           x += sliceWidth;
         }
-
         ctx.lineTo(canvas.width, canvas.height / 2);
         ctx.stroke();
       };
 
-      // Background layer
-      drawWave(2, 0.3, 2);
-      // Foreground layer
+      drawWave(2, 0.25, 2);
       drawWave(0, 1, 3);
     };
 
@@ -109,48 +142,53 @@ export const Waveform: React.FC<WaveformProps> = ({ isActive, analyser }) => {
 
   if (Platform.OS === 'web') {
     return (
-      <View style={styles.container} onLayout={onLayout}>
-        <canvas
-          ref={canvasRef}
-          style={{
-            width: '100%',
-            height: '100%',
-          }}
-        />
+      <View style={[styles.container, !isActive && styles.containerIdle]} onLayout={onLayout}>
+        {isActive && (
+          <canvas
+            ref={canvasRef}
+            style={{ width: '100%', height: '100%' }}
+          />
+        )}
+        {!isActive && <View style={styles.idleLine} />}
       </View>
     );
   }
 
-  // Native Fallback
   return (
-    <View style={styles.container}>
-      {[...Array(5)].map((_, i) => (
-        <Animated.View
-          key={i}
-          style={[
-            styles.bar,
-            { transform: [{ scaleY: isActive ? anim : 1 }] }
-          ]}
-        />
-      ))}
+    <View style={[styles.container, !isActive && styles.containerIdle]}>
+      {isActive ? <NativeBars isActive={isActive} /> : <View style={styles.idleLine} />}
     </View>
   );
 };
 
 const styles = StyleSheet.create({
   container: {
-    height: 120,
+    height: 100,
     width: '100%',
+    alignItems: 'center',
+    justifyContent: 'center',
+    marginVertical: 16,
+  },
+  barContainer: {
     flexDirection: 'row',
     alignItems: 'center',
     justifyContent: 'center',
-    gap: 8,
-    marginVertical: 20,
+    gap: 6,
   },
   bar: {
-    width: 6,
-    height: 40,
+    width: 5,
+    height: 30,
     backgroundColor: Design.colors.primary,
     borderRadius: 3,
+  },
+  containerIdle: {
+    height: 40,
+    marginVertical: 8,
+  },
+  idleLine: {
+    width: 60,
+    height: 2,
+    borderRadius: 1,
+    backgroundColor: Design.colors.outline,
   },
 });

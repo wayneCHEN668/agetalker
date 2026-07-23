@@ -4,16 +4,20 @@ import { Platform } from 'react-native';
 interface UseASROptions {
   onTranscript?: (text: string, isFinal: boolean, emotion?: any) => void;
   onStatusChange?: (status: 'idle' | 'listening' | 'processing') => void;
+  onError?: (message: string) => void;
   wsUrl?: string;
 }
 
-export const useASR = ({ onTranscript, onStatusChange, wsUrl = 'ws://localhost:8050/ws/asr' }: UseASROptions) => {
+export const useASR = ({ onTranscript, onStatusChange, onError, wsUrl = 'ws://localhost:8050/ws/asr' }: UseASROptions) => {
   const [status, setStatus] = useState<'idle' | 'listening' | 'processing'>('idle');
   const [isRecording, setIsRecording] = useState(false);
   
   // Ref for echo cancellation state
   const isTTSMutedRef = useRef(false);
-  const unmuteTimeoutRef = useRef<NodeJS.Timeout | null>(null);
+  const unmuteTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+
+  // Ref to suppress onclose/onerror error toast when close is user-initiated
+  const isIntentionalCloseRef = useRef(false);
 
   const wsRef = useRef<WebSocket | null>(null);
   const audioContextRef = useRef<AudioContext | null>(null);
@@ -43,8 +47,18 @@ export const useASR = ({ onTranscript, onStatusChange, wsUrl = 'ws://localhost:8
       streamRef.current = null;
     }
     if (wsRef.current) {
+      console.log('[useASR.stop] User-initiated close, setting intentional flag');
+      isIntentionalCloseRef.current = true;
+      // Null out handlers to prevent stale onclose/onerror (from pre-hot-reload)
+      // from firing and showing false error toasts
+      wsRef.current.onclose = null;
+      wsRef.current.onerror = null;
       wsRef.current.close();
       wsRef.current = null;
+      // Reset flag after onclose fires (async), so future connections aren't affected
+      setTimeout(() => { isIntentionalCloseRef.current = false; }, 0);
+    } else {
+      console.log('[useASR.stop] wsRef is null, flag NOT set');
     }
   }, [onStatusChange]);
 
@@ -55,6 +69,9 @@ export const useASR = ({ onTranscript, onStatusChange, wsUrl = 'ws://localhost:8
     }
 
     try {
+      // Reset intentional close flag for new connection
+      isIntentionalCloseRef.current = false;
+
       // 1. Setup WebSocket
       wsRef.current = new WebSocket(wsUrl);
       wsRef.current.onopen = () => {
@@ -66,6 +83,11 @@ export const useASR = ({ onTranscript, onStatusChange, wsUrl = 'ws://localhost:8
       wsRef.current.onmessage = (event) => {
         const data = JSON.parse(event.data);
         if (data.type === 'transcript') {
+          // 中间结果：更新 interim 文本（实时显示正在说的文字）
+          if (!data.is_final) {
+            onTranscript?.(data.text, false, undefined);
+            return;
+          }
           onTranscript?.(data.text, data.is_final, data.emotion);
         } else if (data.type === 'status') {
           setStatus(data.state);
@@ -73,9 +95,27 @@ export const useASR = ({ onTranscript, onStatusChange, wsUrl = 'ws://localhost:8
         }
       };
 
-      wsRef.current.onclose = () => stop();
-      wsRef.current.onerror = (err) => {
-        console.error('WebSocket Error:', err);
+      wsRef.current.onclose = (e) => {
+        console.log('[useASR.onclose] code=' + e.code + ', intentional=' + isIntentionalCloseRef.current + ', wasClean=' + e.wasClean);
+        // code 1000 = normal, otherwise unexpected
+        // Skip error toast if close was user-initiated (intentional hangup)
+        if (e.code !== 1000 && !isIntentionalCloseRef.current) {
+          console.log('[useASR.onclose] SHOWING error toast');
+          onError?.('网络连接中断，请再试一次');
+        } else {
+          console.log('[useASR.onclose] Error suppressed (code=' + e.code + ' or intentional)');
+        }
+        stop();
+      };
+      wsRef.current.onerror = () => {
+        console.log('[useASR.onerror] intentional=' + isIntentionalCloseRef.current);
+        // Skip error toast if close was user-initiated
+        if (!isIntentionalCloseRef.current) {
+          console.log('[useASR.onerror] SHOWING error toast');
+          onError?.('网络连接中断，请再试一次');
+        } else {
+          console.log('[useASR.onerror] Error suppressed (intentional)');
+        }
         stop();
       };
 

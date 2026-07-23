@@ -33,6 +33,16 @@ ASR_VAD_KWARGS = {
     'min_speech_duration': 300,
 }
 
+# ── Cloud ASR Configuration (DashScope paraformer-realtime-v2) ────────────────
+# ASR_BACKEND: 'cloud' = 仅云端 | 'local' = 仅本地 FunASR | 'dual' = 云端优先+本地兜底
+ASR_BACKEND = os.getenv('ASR_BACKEND', 'dual')
+ASR_CLOUD_MODEL = 'paraformer-realtime-v2'
+ASR_CLOUD_FORMAT = 'pcm'
+ASR_CLOUD_LANGUAGE_HINTS = ['zh']
+# VAD 断句静音阈值（ms），老年人停顿较长，SDK 默认 800ms 偏短，设为 1200ms
+ASR_CLOUD_MAX_SENTENCE_SILENCE = int(os.getenv('ASR_CLOUD_MAX_SENTENCE_SILENCE', '1200'))
+ASR_CLOUD_HEARTBEAT = True   # 静音时持续发送心跳保持连接不断开
+
 # ── Emotion Configuration (STEP 2) ────────────────────────────────────────────
 EMOTION_MODEL = 'iic/emotion2vec_plus_large'
 EMOTION_CONF_THRESHOLD = 0.45   # Drop to neutral if below this
@@ -103,7 +113,7 @@ DEEPSEEK_BASE_URL = os.getenv('DEEPSEEK_BASE_URL', 'https://api.deepseek.com')
 # （当前指向 deepseek-v4-flash 的非思考模式），直接用显式模型 ID，免得临到弃用日期前
 # 措手不及。deepseek-v4-flash 本身就是官方推荐用于路由/分类/抽取这类高频轻量任务的模型，
 # 跟我们这里的用途正好匹配。
-DEEPSEEK_MODEL    = os.getenv('DEEPSEEK_MODEL', 'deepseek-v4-flash')
+DEEPSEEK_MODEL    = os.getenv('DEEPSEEK_MODEL', 'deepseek-v4-pro')
 
 if DEEPSEEK_API_KEY:
     print(f"DEBUG: DEEPSEEK_API_KEY loaded (length: {len(DEEPSEEK_API_KEY)})")

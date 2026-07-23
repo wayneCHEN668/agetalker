@@ -1,9 +1,21 @@
+"""
+ASR WebSocket 路由（双模式：云端流式 + 本地兜底）。
+
+云端模式：音频帧边收边转发给 DashScope，云端 VAD 自动断句，
+          流式返回中间结果（is_final:false）和最终结果（is_final:true）。
+本地模式：保留 RMS 静音检测 + 攒整句 + FunASR 批量推理逻辑。
+
+两种模式下，最终结果（is_final:true）都会触发情绪识别，并将结果一并推送给前端。
+"""
+
 import asyncio
 import json
 import logging
 from datetime import datetime, timezone, timedelta
+
 import numpy as np
 from fastapi import APIRouter, WebSocket, WebSocketDisconnect
+
 from services.asr_service import ASRService
 from services.emotion_service import EmotionService
 from config import ASR_SILENCE_RMS, ASR_SILENCE_FRAMES
@@ -15,71 +27,224 @@ router = APIRouter()
 asr_service: ASRService = None
 emotion_service: EmotionService = None
 
+
 @router.websocket("/ws/asr")
 async def asr_endpoint(websocket: WebSocket):
+    print(">>> ASR WebSocket handler ENTERED <<<", flush=True)
     await websocket.accept()
+    print(">>> WebSocket accepted <<<", flush=True)
     session_id = websocket.query_params.get("session_id", "default_user")
     logger.info(f"ASR Client connected: {websocket.client}, session_id: {session_id}")
-    
-    audio_buffer = []
-    silent_frames = 0
-    
-    # Send initial status
+    print(f">>> session_id={session_id}, asr_service={asr_service} <<<", flush=True)
+
+    loop = asyncio.get_running_loop()
+
+    # 根据初始化时判断哪个后端可用（无需探活，避免触发 SDK 错误）
+    use_cloud = asr_service.is_cloud_active
+    logger.info(f"Session {session_id} backend: {'cloud' if use_cloud else 'local'}")
+
+    try:
+        if use_cloud:
+            await _handle_cloud_session(websocket, session_id, loop)
+        else:
+            await _handle_local_session(websocket, session_id)
+    finally:
+        # 确保会话资源释放
+        asr_service.end_session(session_id)
+
+
+async def _handle_cloud_session(
+    websocket: WebSocket,
+    session_id: str,
+    loop: asyncio.AbstractEventLoop,
+):
+    """云端流式模式：边收边转发，回调推送结果。"""
+    print(">>> _handle_cloud_session ENTERED <<<", flush=True)
+
+    # 用于情绪识别的音频累积 buffer
+    sentence_audio: list[np.ndarray] = []
+    audio_lock = asyncio.Lock()
+
+    async def on_asr_result(text: str, is_final: bool):
+        """由 CloudASRBackend 桥接到 asyncio 事件循环后调用。"""
+        nonlocal sentence_audio
+        beijing_time = datetime.now(
+            timezone(timedelta(hours=8))
+        ).strftime("%Y-%m-%d %H:%M:%S")
+
+        if is_final and text.strip():
+            # 句末：取出累积音频做情绪识别
+            async with audio_lock:
+                if sentence_audio:
+                    audio_for_emotion = np.concatenate(sentence_audio)
+                    sentence_audio.clear()
+                else:
+                    audio_for_emotion = np.zeros(16000, dtype=np.float32)
+
+            emotion_res = await asyncio.to_thread(
+                emotion_service.analyze, audio_for_emotion, session_id,
+            )
+            logger.info(
+                f"Session {session_id} | Transcript: {text} "
+                f"| Emotion: {emotion_res.label_zh}"
+            )
+
+            try:
+                await websocket.send_text(json.dumps({
+                    "type": "transcript",
+                    "text": text,
+                    "emotion": emotion_service.to_dict(emotion_res),
+                    "is_final": True,
+                    "timestamp": beijing_time,
+                }))
+            except Exception:
+                pass  # WebSocket 可能已关闭
+
+        elif not is_final:
+            # 中间结果：推送给前端实时显示
+            try:
+                await websocket.send_text(json.dumps({
+                    "type": "transcript",
+                    "text": text,
+                    "is_final": False,
+                    "timestamp": beijing_time,
+                }))
+            except Exception:
+                pass
+
     await websocket.send_text(json.dumps({"type": "status", "state": "listening"}))
-    
+    logger.info(f"Cloud ASR: Sent 'listening' status, waiting for audio frames...")
+
+    # 延迟创建会话：收到第一帧音频后才调用 create_session() + start()
+    session_created = False
+
+    try:
+        frame_count = 0
+        while True:
+            data = await websocket.receive_bytes()
+            frame_count += 1
+            
+            # 第一帧收到后立即记录
+            if frame_count == 1:
+                print(f">>> FIRST AUDIO FRAME: {len(data)} bytes <<<", flush=True)
+                logger.info(f"✓ Received first audio frame: {len(data)} bytes")
+            
+            chunk = ASRService.bytes_to_float32(data)
+
+            # 收到第一帧音频后才创建会话并 start()（避免 SDK 超时）
+            if not session_created:
+                print(f">>> Creating ASR session (calling start())... <<<", flush=True)
+                import time
+                t0 = time.monotonic()
+                asr_service.create_session(session_id, on_asr_result, loop)
+                elapsed = time.monotonic() - t0
+                session_created = True
+                print(f">>> ASR session created in {elapsed:.3f}s <<<", flush=True)
+                logger.info(f"Cloud ASR session created after receiving first audio frame ({elapsed:.3f}s)")
+
+            # 转发原始 Int16 PCM 字节给云端
+            # WebSocket receive_bytes() 返回 bytes 对象，直接传给 SDK
+            # DashScope SDK 期望：Int16 PCM 小端序，16kHz，单声道
+            if frame_count <= 3:  # 只打印前几帧用于调试
+                logger.info(f"Frame {frame_count}: {len(data)} bytes, first 8 bytes hex={data[:8].hex()}")
+                print(f">>> Frame {frame_count}: {len(data)} bytes <<<", flush=True)
+            asr_service.send_audio(session_id, data)
+            if frame_count == 1:
+                print(f">>> Frame 1 sent, looping back for more... <<<", flush=True)
+
+            # 累积 float32 音频供情绪识别
+            async with audio_lock:
+                sentence_audio.append(chunk)
+
+    except WebSocketDisconnect as wd:
+        print(f">>> WebSocketDisconnect: code={wd.code}, reason={wd.reason}, frames_received={frame_count} <<<", flush=True)
+        logger.info(f"ASR Client disconnected (cloud): {session_id}, code={wd.code}, frames={frame_count}")
+    except Exception as e:
+        print(f">>> EXCEPTION: {type(e).__name__}: {e} <<<", flush=True)
+        logger.error(
+            f"WebSocket error (cloud) for session {session_id}: {e}",
+            exc_info=True,
+        )
+        try:
+            await websocket.send_text(json.dumps({
+                "type": "error",
+                "code": "ASR_ROUTER_ERROR",
+                "message": str(e),
+            }))
+        except Exception:
+            pass
+
+
+async def _handle_local_session(websocket: WebSocket, session_id: str):
+    """本地兜底模式：RMS 静音检测 + 攒整句 + 批量推理。"""
+    audio_buffer: list[np.ndarray] = []
+    silent_frames = 0
+
+    await websocket.send_text(json.dumps({"type": "status", "state": "listening"}))
+
     try:
         while True:
-            # Receive binary PCM chunks (Int16)
             data = await websocket.receive_bytes()
             chunk = ASRService.bytes_to_float32(data)
             rms = ASRService.compute_rms(chunk)
-            
+
             if rms < ASR_SILENCE_RMS:
                 silent_frames += 1
             else:
                 silent_frames = 0
                 audio_buffer.append(chunk)
-            
-            # Trigger inference if silence threshold reached
+
+            # 静音阈值触发推理
             if silent_frames >= ASR_SILENCE_FRAMES and len(audio_buffer) > 5:
                 audio = np.concatenate(audio_buffer)
                 audio_buffer.clear()
                 silent_frames = 0
-                
-                await websocket.send_text(json.dumps({"type": "status", "state": "processing"}))
-                
-                # Run ASR and Emotion analysis in parallel
+
+                await websocket.send_text(
+                    json.dumps({"type": "status", "state": "processing"})
+                )
+
+                # ASR + 情绪并行
                 asr_task = asyncio.to_thread(asr_service.transcribe, audio)
-                emotion_task = asyncio.to_thread(emotion_service.analyze, audio, session_id)
-                
+                emotion_task = asyncio.to_thread(
+                    emotion_service.analyze, audio, session_id,
+                )
                 text, emotion_res = await asyncio.gather(asr_task, emotion_task)
-                
+
                 if text.strip():
-                    logger.info(f"Session {session_id} | Transcript: {text} | Emotion: {emotion_res.label_zh}")
-                    
-                    # Localized timestamp (Beijing Time UTC+8)
-                    beijing_time = datetime.now(timezone(timedelta(hours=8))).strftime("%Y-%m-%d %H:%M:%S")
-                    
-                    # Protocol: Unified result without audio_b64 as per Merged Design
+                    logger.info(
+                        f"Session {session_id} | Transcript: {text} "
+                        f"| Emotion: {emotion_res.label_zh}"
+                    )
+                    beijing_time = datetime.now(
+                        timezone(timedelta(hours=8))
+                    ).strftime("%Y-%m-%d %H:%M:%S")
+
                     await websocket.send_text(json.dumps({
                         "type": "transcript",
                         "text": text,
                         "emotion": emotion_service.to_dict(emotion_res),
                         "is_final": True,
-                        "timestamp": beijing_time
+                        "timestamp": beijing_time,
                     }))
-                
-                await websocket.send_text(json.dumps({"type": "status", "state": "listening"}))
-                
+
+                await websocket.send_text(
+                    json.dumps({"type": "status", "state": "listening"})
+                )
+
     except WebSocketDisconnect:
-        logger.info(f"ASR Client disconnected: {session_id}")
+        logger.info(f"ASR Client disconnected (local): {session_id}")
     except Exception as e:
-        logger.error(f"WebSocket error for session {session_id}: {e}", exc_info=True)
+        logger.error(
+            f"WebSocket error (local) for session {session_id}: {e}",
+            exc_info=True,
+        )
         try:
             await websocket.send_text(json.dumps({
                 "type": "error",
                 "code": "ASR_ROUTER_ERROR",
-                "message": str(e)
+                "message": str(e),
             }))
-        except:
+        except Exception:
             pass
+

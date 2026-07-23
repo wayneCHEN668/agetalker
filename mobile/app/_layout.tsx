@@ -51,6 +51,29 @@ export default function RootLayout() {
 function RootLayoutNav() {
   const colorScheme = useColorScheme();
 
+  // Suppress known deprecation warnings from react-native-web and Web Audio API
+  useEffect(() => {
+    const originalWarn = console.warn;
+    console.warn = (...args: any[]) => {
+      const msg = String(args[0]);
+      if (
+        msg.includes('ScriptProcessorNode') ||
+        msg.includes('shadowColor') ||
+        msg.includes('shadowOffset') ||
+        msg.includes('shadowOpacity') ||
+        msg.includes('shadowRadius') ||
+        msg.includes('useNativeDriver') ||
+        msg.includes('pointerEvents is deprecated')
+      ) {
+        return;
+      }
+      originalWarn.apply(console, args);
+    };
+    return () => {
+      console.warn = originalWarn;
+    };
+  }, []);
+
   return (
     <ThemeProvider value={colorScheme === 'dark' ? DarkTheme : DefaultTheme}>
       <Stack>

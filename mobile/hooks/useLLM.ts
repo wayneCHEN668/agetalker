@@ -4,10 +4,18 @@ import { TTSParams } from '../constants/TTS';
 interface UseLLMOptions {
   baseUrl?: string;
   onSentence?: (sentence: string, ttsParams: TTSParams, category: string) => void;
+  onDelta?: (deltaText: string) => void;
+  onDone?: (strategyName?: string) => void;
 }
 
 export const useLLM = (options: UseLLMOptions = {}) => {
-  const { baseUrl = 'http://localhost:8050', onSentence } = options;
+  const {
+    baseUrl = 'http://localhost:8050',
+    onSentence,
+    onDelta,
+    onDone,
+  } = options;
+
   const [response, setResponse] = useState('');
   const [isStreaming, setIsStreaming] = useState(false);
   const [strategyName, setStrategyName] = useState('');
@@ -18,6 +26,7 @@ export const useLLM = (options: UseLLMOptions = {}) => {
     let fullText = '';
     let ttsParams: TTSParams = { speed: 1.0, pitch: 0, style: 'neutral' };
     let category = 'neutral';
+    let capturedStrategyName = '';
     setStrategyName('');
 
     try {
@@ -27,7 +36,7 @@ export const useLLM = (options: UseLLMOptions = {}) => {
         body: JSON.stringify({
           text,
           emotion: emotion || { label: 'neutral' },
-          session_id: 'default'
+          session_id: 'default',
         }),
       });
 
@@ -58,18 +67,21 @@ export const useLLM = (options: UseLLMOptions = {}) => {
               const data = JSON.parse(part.slice(6));
               if (data.type === 'delta') {
                 const deltaText = data.text;
-                setResponse(prev => prev + deltaText);
+                setResponse((prev) => prev + deltaText);
                 fullText += deltaText;
+                onDelta?.(deltaText);
               } else if (data.type === 'done') {
-                // Capture backend-computed TTS params, category, and strategy
                 if (data.tts_params) {
                   ttsParams = data.tts_params;
                 }
                 category = data.category || 'neutral';
-                setStrategyName(data.strategy_name || '');
+                capturedStrategyName = data.strategy_name || '';
+                setStrategyName(capturedStrategyName);
               } else if (data.type === 'error') {
                 console.error('LLM Service Error:', data.message);
-                setResponse(prev => prev + `\n[系统错误: ${data.message}]`);
+                const errText = `\n[系统错误: ${data.message}]`;
+                setResponse((prev) => prev + errText);
+                onDelta?.(errText);
               }
             } catch (e) {
               console.warn('Failed to parse SSE chunk:', part);
@@ -78,18 +90,23 @@ export const useLLM = (options: UseLLMOptions = {}) => {
         }
       }
 
-      // Once full text is collected, trigger TTS with backend params
+      // 流完成回调（传递策略名称给前端气泡标签）
+      onDone?.(capturedStrategyName);
+
+      // 整句完成后触发 TTS
       if (fullText.trim()) {
         onSentence?.(fullText.trim(), ttsParams, category);
       }
-
     } catch (err) {
       console.error('LLM Fetch Error:', err);
-      setResponse('哎呀，我刚才走神了，没听清您说什么。能麻烦您再说一遍吗？');
+      const fallback = '哎呀，我刚才走神了，没听清您说什么。能麻烦您再说一遍吗？';
+      setResponse(fallback);
+      onDelta?.(fallback);
+      onDone?.();
     } finally {
       setIsStreaming(false);
     }
-  }, [baseUrl, onSentence]);
+  }, [baseUrl, onSentence, onDelta, onDone]);
 
   const reset = useCallback(() => {
     setResponse('');

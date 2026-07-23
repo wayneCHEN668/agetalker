@@ -1,61 +1,72 @@
 export const Design = {
   colors: {
-    // 基础背景
-    background: '#FAF9F6', // 暖沙色，护眼且温馨
+    // 基础背景 — 暖暮色调
+    background: '#FBF7F4', // 暖奶油色，护眼且温暖
     surface: '#FFFFFF',
-    surfaceDim: '#F0EFEA',
-    
-    // 主色调：愈疗绿 (Sage)
-    primary: '#4A6741',      // 深鼠尾草绿，沉稳可靠
+    surfaceDim: '#F5F1ED',
+
+    // 主色调：尘玫瑰 (Dusty Rose) — 温暖、疗愈、有质感
+    primary: '#C17B6A',
     onPrimary: '#FFFFFF',
-    primaryContainer: '#E8F5E9',
-    onPrimaryContainer: '#1B2E16',
-    
+    primaryContainer: '#F5E4DE',
+    onPrimaryContainer: '#3D231B',
+
     // 辅助色
-    secondary: '#70787D',
-    outline: '#E0E0E0',
-    
-    // 情绪背景光晕 (Aura Colors)
+    secondary: '#7A6E68',
+    outline: '#E8E0DB',
+
+    // 危机（仅真正高危时使用）
+    crisis: '#D4453B',
+    // 录音中状态（暖色调，不打断情感弧线）
+    recording: '#7A6E68',
+
+    // 情绪背景光晕 (Aura Colors) — 保持语义，调整色调与暖暮协调
     aura: {
-      neutral: ['#F5F5F5', '#E3F2FD'],
-      happy: ['#FFF9C4', '#FFE082'],
-      sad: ['#E1F5FE', '#B3E5FC'],
-      angry: ['#FFEBEE', '#FFCDD2'],
-      fearful: ['#F3E5F5', '#E1BEE7'],
-      disgusted: ['#F1F8E9', '#DCEDC8'],
-      surprised: ['#E0F7FA', '#B2EBF2'],
+      neutral:   ['#FBF7F4', '#ECE4DF'],
+      happy:     ['#FFF2E6', '#FFDCC0'],
+      sad:       ['#EBEBF0', '#D5D8E8'],
+      angry:     ['#FDE8E5', '#F8CEC8'],
+      fearful:   ['#F0E8EF', '#E0D0E4'],
+      disgusted: ['#EEF0E6', '#DDE0CA'],
+      surprised: ['#EAF0F5', '#D0DFEC'],
     },
 
     text: {
-      primary: '#2D3436',   // 极高对比度
-      secondary: '#636E72',
-      hint: '#B2BEC3',
-    }
+      primary: '#2D2320',   // 暖调近黑，高对比度
+      secondary: '#6B5E58',
+      hint: '#8B7D76',
+    },
   },
   typography: {
     fontFamily: 'Lexend_400Regular',
     display: {
-      fontSize: 40,
-      lineHeight: 48,
-      fontWeight: '700',
+      fontSize: 32,
+      lineHeight: 40,
+      fontWeight: '600' as const,
     },
     headline: {
-      fontSize: 28,
-      lineHeight: 36,
-      fontWeight: '600',
+      fontSize: 24,
+      lineHeight: 32,
+      fontWeight: '600' as const,
     },
     message: {
-      fontSize: 20,         // 减小 2 号，原为 22
-      lineHeight: 30,
+      fontSize: 18,
+      lineHeight: 28,
     },
     label: {
-      fontSize: 14,
+      fontSize: 13,
       letterSpacing: 1.5,
-      fontWeight: '600',
-    }
+      fontWeight: '500' as const,
+    },
+    caption: {
+      fontSize: 14,
+      lineHeight: 20,
+      fontWeight: '400' as const,
+    },
   },
   layout: {
-    radius: 32,
+    radius: 24,
+    radiusSmall: 12,
     spacing: 24,
     innerPadding: 20,
   },

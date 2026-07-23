@@ -8,4 +8,4 @@ python-dotenv
 pytest
 pytest-asyncio
 openai
-dashscope
+dashscope>=1.23.1

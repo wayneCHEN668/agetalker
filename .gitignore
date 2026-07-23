@@ -25,3 +25,10 @@ dist/
 # Environment
 .env
 .env.local
+
+# IDEs
+.qoder/
+.vscode/
+.playwright-mcp/
+.codegraph/
+.pytest_cache/
