@@ -1,0 +1,97 @@
+diff --git a/backend/prompts/templates.py b/backend/prompts/templates.py
+index 87b3263..2c9af54 100644
+--- a/backend/prompts/templates.py
++++ b/backend/prompts/templates.py
+@@ -69,8 +69,24 @@ v3 -> v4 变更记录（本次新增：类别延续判定，解决"叙事中间
+   错误地提前退出，代价（红线保护失效）比"多停留一轮"严重得多。
+ - build_router_user_prompt() 新增 last_category 参数，把会话级的"上一轮判定类别"
+   显式传给路由模型，而不是只依赖它从原始对话文本里自己反推。
++
++v4 -> v5 变更记录（本次新增：危机词表统一去重）
++------------------------------------------------
++问题：硬性关键词熔断层（config.CRISIS_KEYWORDS，llm_service._check_crisis() 用）
++和路由 prompt 里"高危熔断"规则举例用的词，此前是两份手写文本，内容有重叠但不
++完全一致，且没有任何机制保证同步——关键词层加了新词，prompt 里的例子不会跟着
++更新，久而久之两边会自然漂移。
++
++解决方案：CRISIS_KEYWORDS 保留在 config.py，作为唯一来源；ROUTER_SYSTEM_PROMPT
++里"高危熔断"这条规则的示例词，改为 _build_crisis_signal_section() 从
++CRISIS_KEYWORDS 动态生成（与 _build_strategy_menu_section() 对策略库的处理方式
++一致）。两层的分工没有变：关键词层做字面穷举匹配（硬性、0ms），路由层做语义判断
++（覆盖委婉/隐晦表达，字面没命中关键词也要能识别），只是现在路由层看到的示例
++词，和关键词层实际匹配的词，保证是同一份。
+ """
+ 
++from config import CRISIS_KEYWORDS
++
+ # --------------------------------------------------------------------------- #
+ # STEP 2 的数据先定义：按心理类别组织的红线 + 结构化策略库
+ # 内容从 generate_replies.py 的 MODULE_PROMPTS 实质性搬运，并改写为
+@@ -293,6 +309,29 @@ def _build_strategy_menu_section() -> str:
+ # STEP 1：心理类别 + 策略路由（独立轻量调用，与生成调用分离）
+ # --------------------------------------------------------------------------- #
+ 
++def _build_crisis_signal_section() -> str:
++    """
++    根据 config.CRISIS_KEYWORDS 动态生成路由 prompt 里"高危熔断"这条规则的示例词文本。
++
++    示例词与 llm_service._check_crisis() 硬性关键词熔断层用的是同一份列表
++    （config.CRISIS_KEYWORDS），只有一份来源维护，不会出现"路由模型语义层"
++    和"硬性关键词层"两边各自手写一份、后续新增/修改时互相漂移的问题——关键词
++    层新加一个词，路由模型看到的示例会自动同步，不需要再改一遍 prompt 文案。
++
++    这里列出的词仍然只是"例子"，不是穷举：路由模型要做的是语义判断（覆盖委婉/
++    隐晦表达），不是逐词匹配——逐词匹配已经由硬性关键词层做了，路由层的价值
++    恰恰在于补上关键词层字面匹配覆盖不到的表达方式。
++    """
++    quoted = '、'.join(f'"{kw}"' for kw in CRISIS_KEYWORDS)
++    return (
++        f'8. 【高危熔断】：无论以上判断如何，只要出现{quoted}等高危轻生信号'
++        '（或者字面上没有直接命中这些词，但整体语义明显在交代后事、道别、寻死'
++        '这类委婉/隐晦表达），必须将 is_crisis 设为 true，category 设为 '
++        '"crisis"，此时其他分类规则不再适用，crisis 优先级最高，strategy_id '
++        '留空字符串即可。\n'
++    )
++
++
+ _ROUTER_BASE_PROMPT = """\
+ 你是老年人情绪陪伴系统的"心理类别与策略路由"模块，要在不拖慢实时对话的前提下，
+ 快速判断老年人这句话属于哪个心理类别，并选出这一轮该用哪一条具体策略。
+@@ -342,9 +381,6 @@ _ROUTER_BASE_PROMPT = """\
+ 
+ 7. 中性/闲聊：陈述事实、寒暄、日常话题，没有明显情绪诉求或心理困扰 → category = "neutral"
+ 
+-8. 【高危熔断】：无论以上判断如何，只要出现"不想活了""交代后事""活着没意思（伴随放弃感）"
+-   "没人需要我了"等高危轻生信号，必须将 is_crisis 设为 true，category 设为 "crisis"，
+-   此时其他分类规则不再适用，crisis 优先级最高，strategy_id 留空字符串即可。
+ """
+ 
+ _ROUTER_OUTPUT_FORMAT = """\
+@@ -363,7 +399,13 @@ _ROUTER_OUTPUT_FORMAT = """\
+ 
+ # 拼装：分类规则 + 动态生成的策略库 + 输出格式。策略库只在 CATEGORY_STRATEGY_MAP
+ # 一处维护，这里只是引用生成结果，不会出现两份策略列表互相漂移的问题。
+-ROUTER_SYSTEM_PROMPT = _ROUTER_BASE_PROMPT + '\n' + _build_strategy_menu_section() + _ROUTER_OUTPUT_FORMAT
++ROUTER_SYSTEM_PROMPT = (
++    _ROUTER_BASE_PROMPT
++    + _build_crisis_signal_section()
++    + '\n'
++    + _build_strategy_menu_section()
++    + _ROUTER_OUTPUT_FORMAT
++)
+ 
+ 
+ def build_router_user_prompt(
+diff --git a/backend/selftest/test_llm_service.py b/backend/selftest/test_llm_service.py
+index 0f3d107..1c932d9 100644
+--- a/backend/selftest/test_llm_service.py
++++ b/backend/selftest/test_llm_service.py
+@@ -68,7 +68,7 @@ async def test_history_cropping(llm_service):
+ 
+     # Mock 路由 LLM（避免真实 API 调用）
+     with patch.object(llm_service, '_route_category', new_callable=AsyncMock) as mock_route:
+-        mock_route.return_value = ('neutral', 'test routing')
++        mock_route.return_value = ('neutral', 'test routing', '')  # v5: 三元组 (category, matched_signals, strategy_id)
+         # Mock 流式 API 调用
+         with patch.object(llm_service.client.chat.completions, 'create', new_callable=AsyncMock) as mock_create:
+             # 构造一个空的流式响应

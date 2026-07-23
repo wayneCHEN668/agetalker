@@ -68,7 +68,7 @@ async def test_history_cropping(llm_service):
 
     # Mock 路由 LLM（避免真实 API 调用）
     with patch.object(llm_service, '_route_category', new_callable=AsyncMock) as mock_route:
-        mock_route.return_value = ('neutral', 'test routing')
+        mock_route.return_value = ('neutral', 'test routing', '')  # v5: 三元组 (category, matched_signals, strategy_id)
         # Mock 流式 API 调用
         with patch.object(llm_service.client.chat.completions, 'create', new_callable=AsyncMock) as mock_create:
             # 构造一个空的流式响应

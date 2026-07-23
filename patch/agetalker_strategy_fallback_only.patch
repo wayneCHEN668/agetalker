@@ -1,0 +1,153 @@
+diff --git a/backend/prompts/templates.py b/backend/prompts/templates.py
+index 2c9af54..ac153f6 100644
+--- a/backend/prompts/templates.py
++++ b/backend/prompts/templates.py
+@@ -264,12 +264,20 @@ _STRATEGY_ID_SETS: dict[str, set[str]] = {
+ }
+ 
+ 
+-def resolve_strategy_id(category: str, strategy_id: str) -> str:
++def resolve_strategy_id(category: str, strategy_id: str, last_used_id: str = '') -> str:
+     """
+     校验/兜底某个 category 的 strategy_id。
+ 
+-    如果传入的 id 是空字符串、拼写错误、或者不在该 category 的策略列表内，
+-    一律兜底为该 category 的第一条策略（相当于"从头开始"，是个保守但安全的默认值）。
++    优先级（从高到低）：
++    1. strategy_id 本身合法（在该 category 的策略列表内）→ 原样返回。
++    2. strategy_id 不合法，但 last_used_id 合法 → 兜底为 last_used_id，即保持在
++       会话已经推进到的那一步，不打断正在进行的多轮干预节奏。路由异常（网络
++       抖动、JSON 解析失败等）应该表现为"原地不动"，而不是"退回起点"——对已经
++       走了几轮的老人来说，无缘无故从"认知重构"跳回"识别消极想法"是一次不必要
++       的体验倒退，不是安全性要求。
++    3. strategy_id 和 last_used_id 都不合法（比如这个类别在本会话里还没用过
++       任何策略、或者 last_used_id 本身也是脏数据）→ 兜底为该 category 的
++       第一条策略。这才是真正意义上"确实没有任何可参考历史"时的最后防线。
+ 
+     这是公开函数：调用方（llm_service）需要知道"这一轮实际生效的是哪个策略"，
+     才能把正确的值记录进会话的"已用策略"历史里——记录的必须是兜底之后真正会被
+@@ -279,6 +287,8 @@ def resolve_strategy_id(category: str, strategy_id: str) -> str:
+     valid_ids = _STRATEGY_ID_SETS.get(category, _STRATEGY_ID_SETS['neutral'])
+     if strategy_id in valid_ids:
+         return strategy_id
++    if last_used_id in valid_ids:
++        return last_used_id
+     return cat_cfg['strategies'][0]['id']
+ 
+ 
+diff --git a/backend/selftest/test_llm_service.py b/backend/selftest/test_llm_service.py
+index 1c932d9..cb6dd86 100644
+--- a/backend/selftest/test_llm_service.py
++++ b/backend/selftest/test_llm_service.py
+@@ -152,3 +152,60 @@ def test_category_tts_params(llm_service):
+     assert llm_service._get_tts_params_by_category('neutral', True)['speed'] == 0.82
+     # 未知类别 → 降级 neutral
+     assert llm_service._get_tts_params_by_category('unknown', False)['speed'] == 1.00
++
++
++def test_resolve_strategy_id_fallback_priority():
++    """
++    验证 resolve_strategy_id() 的兜底优先级：合法值 → 上次用过的策略 → 第一条策略。
++    """
++    from prompts.templates import resolve_strategy_id, CATEGORY_STRATEGY_MAP
++
++    first_id = CATEGORY_STRATEGY_MAP['depression']['strategies'][0]['id']
++    third_id = CATEGORY_STRATEGY_MAP['depression']['strategies'][2]['id']
++
++    # 1. 合法值直接原样返回，不受 last_used_id 影响
++    assert resolve_strategy_id('depression', third_id, last_used_id=first_id) == third_id
++
++    # 2. strategy_id 非法但 last_used_id 合法 → 兜底为 last_used_id（停在原地，不退回起点）
++    assert resolve_strategy_id('depression', 'bogus_id', last_used_id=third_id) == third_id
++
++    # 3. strategy_id 和 last_used_id 都非法/缺失 → 退回该类别第一条（最后一层兜底）
++    assert resolve_strategy_id('depression', '', last_used_id='') == first_id
++    assert resolve_strategy_id('depression', 'bogus_id', last_used_id='also_bogus') == first_id
++
++    # 4. 不传 last_used_id（默认值）时行为与旧版一致：非法值直接退回第一条
++    assert resolve_strategy_id('depression', 'bogus_id') == first_id
++
++
++@pytest.mark.asyncio
++async def test_strategy_fallback_stays_at_last_used(llm_service):
++    """
++    集成验证：路由返回非法 strategy_id 时，stream_reply() 应该把这一轮兜底为该
++    会话在该类别里"上一轮实际用过的策略"，而不是永远退回该类别第一条策略。
++    """
++    session_id = 'test_strategy_fallback'
++    category = 'depression'
++    third_id = 'body_release'  # depression 策略库里的第 3 条，见 CATEGORY_STRATEGY_MAP
++
++    # 预先模拟这个会话在 depression 类别下已经推进到第 3 条策略
++    llm_service.strategy_history[session_id] = {category: [
++        'identify_negative_thoughts', 'cognitive_reframe', third_id,
++    ]}
++    llm_service.last_category[session_id] = category
++
++    empty_stream = AsyncMock()
++    empty_stream.__aiter__.return_value = []
++
++    # 路由这一轮返回了一个不在策略库里的非法 strategy_id（模拟路由模型抽风/解析异常兜底前的原始值）
++    with patch.object(llm_service, '_route_category', new_callable=AsyncMock) as mock_route:
++        mock_route.return_value = (category, '路由异常模拟', 'not_a_real_strategy_id')
++        with patch.object(llm_service.client.chat.completions, 'create', new_callable=AsyncMock) as mock_create:
++            mock_create.return_value = empty_stream
++
++            gen = llm_service.stream_reply("测试消息", {"label": "neutral"}, session_id)
++            chunks = [c async for c in gen]
++
++    done = next(c for c in chunks if c.get('type') == 'done')
++    # 应该兜底为"上一轮用过的策略"（第 3 条），不是该类别第一条
++    assert done['strategy_id'] == third_id
++    assert done['strategy_id'] != 'identify_negative_thoughts'
+diff --git a/backend/services/llm_service.py b/backend/services/llm_service.py
+index aa5500b..50d980c 100644
+--- a/backend/services/llm_service.py
++++ b/backend/services/llm_service.py
+@@ -68,6 +68,15 @@ class LLMService:
+       配合 ROUTER_SYSTEM_PROMPT 里新增的"类别延续判定"规则（不对称：进入敏感
+       类别门槛不变，退出敏感类别需要更明确的信号），让路由模型正确把一句字面
+       中性的话识别成"同一段叙事的延续"，而不是逐句独立判断导致中途误判成 neutral。
++
++    v5 -> v6 变更（strategy_id 兜底优先"停在原地"，不再永远退回第一条）：
++    - 新增 _last_used_strategy()：取该会话在某类别里最近一次实际生效的策略 id。
++    - resolve_strategy_id() 新增 last_used_id 参数（见 prompts/templates.py），
++      兜底优先级从"合法值 → 第一条策略"改为"合法值 → 上次用过的策略 → 第一条
++      策略"。原因：路由异常（网络抖动、JSON 解析失败等 _route_category() 已知
++      的降级场景）此前会让已经推进到第 N 步的多轮干预无缘无故跳回第一步，这是
++      不必要的体验倒退，不是安全性要求——真正的安全底线（红线、危机熔断）不受
++      这个改动影响，只是"异常时应该退到哪一步"这个选择更合理了。
+     """
+ 
+     def __init__(self):
+@@ -222,6 +231,16 @@ class LLMService:
+         used.append(strategy_id)
+         used[:] = used[-_MAX_STRATEGY_HISTORY_PER_CATEGORY:]
+ 
++    def _last_used_strategy(self, session_id: str, category: str) -> str:
++        """
++        取这个会话在该 category 里最近一次实际生效的策略 id，供 resolve_strategy_id()
++        路由异常兜底时使用——优先"停在原地"而不是"退回到该类别第一条策略"。
++        这个类别在本会话里还没记录过任何策略时，返回空字符串（resolve_strategy_id()
++        会据此自然地落到"退回第一条"这最后一层兜底）。
++        """
++        used = self.strategy_history.get(session_id, {}).get(category)
++        return used[-1] if used else ''
++
+     # ─── 主入口：流式生成回复 ────────────────────────────────────────────────
+ 
+     async def stream_reply(
+@@ -284,8 +303,11 @@ class LLMService:
+                 matched_signals = ''
+                 strategy_id = ''
+             else:
+-                # 兜底校验，记录的必须是这个最终生效的值，不是路由原始返回值
+-                strategy_id = resolve_strategy_id(category, raw_strategy_id)
++                # 兜底校验：优先回到会话在该类别里"上一次用过的策略"（保持推进
++                # 节奏），只有连这个都没有时才退回该类别第一条——记录的必须是
++                # 这个最终生效的值，不是路由原始返回值
++                last_used_id = self._last_used_strategy(session_id, category)
++                strategy_id = resolve_strategy_id(category, raw_strategy_id, last_used_id)
+                 self._record_strategy_use(session_id, category, strategy_id)
+                 # 查找策略中文名（供前端展示，避免前端再维护一份策略名称映射）
+                 _cat_cfg = CATEGORY_STRATEGY_MAP.get(category, CATEGORY_STRATEGY_MAP['neutral'])
