@@ -145,6 +145,43 @@ CRISIS_KEYWORDS = [
     '自杀','跳楼','上吊','割腕','轻生','死了算了','死了就解脱','死了就没事了','死了就自由了','死了就不痛苦了','死了就不难过了'
 ]
 
+# 危机警惕期：命中危机后，接下来 N 轮即使没有再出现危机信号，也维持警惕态
+# （设计文档 §9.3「下一轮回复仍保持警惕状态」）。危机不是一轮就翻篇的事，
+# 紧接着的几轮恰恰是最需要稳住的时候。
+CRISIS_VIGILANCE_TURNS = 3
+
+# ── 会话弧线与节奏 ───────────────────────────────────────────────────────────
+# 一小时的陪伴对话有宏观结构：暖场 → 深入 → 收束。纯逐轮反应式的对话没有这个
+# 概念，结果是把老人的哀伤话题打开之后，用一个计时器把界面抹掉就算结束了。
+SESSION_OPENING_TURNS    = 3     # 前 N 轮算暖场阶段
+SESSION_CLOSING_AFTER_MIN = 45   # 聊了多少分钟之后开始往收尾引导
+
+# 连续多少轮以问句结尾就强制这一轮不再提问。
+# CARE 的 E 步骤（开放提问）原本几乎每轮必做，一小时下来是 100 多个问题——
+# 那是审讯不是陪伴。真正的陪伴里有沉默，也有单纯的"嗯，我懂"。
+MAX_CONSECUTIVE_QUESTIONS = 3
+
+# ── 长程记忆（事实台账 + 滚动摘要）───────────────────────────────────────────
+# 对话历史只保留 6 轮（约 3~5 分钟），而一次陪伴对话可能持续一小时。没有长程
+# 记忆时，第 40 分钟的模型完全不知道第 5 分钟说过什么，只能反问（老人会觉得
+# "你没在听"）或者编造（违反事实红线）。
+MEMORY_ENABLED = os.getenv('MEMORY_ENABLED', '1') != '0'
+MEMORY_DIR     = os.getenv('MEMORY_DIR', 'data/memory')
+
+# 台账各类条目上限：既防止文件无限增长，也保证注入 prompt 的长度可控。
+# 超出时按"最近提到"淘汰最旧的。
+MEMORY_MAX_PEOPLE      = 12
+MEMORY_MAX_EVENTS      = 20
+MEMORY_MAX_PREFERENCES = 15
+MEMORY_MAX_NOTES_PER_PERSON = 6
+
+# 滚动摘要：每滑出多少条消息触发一次压缩，以及摘要长度上限
+MEMORY_SUMMARY_EVERY_N_MSGS = 8
+MEMORY_SUMMARY_MAX_CHARS    = 400
+
+# 跨会话保留多少段历史会话摘要（供"上次咱们聊到…"这类回指）
+MEMORY_MAX_SESSION_SUMMARIES = 5
+
 # ── TTS Emotion Mapping (STEP 4) ─────────────────────────────────────────────
 # Note: TTS emotions are "healing symmetries" to the user's emotion
 TTS_PARAMS_MAP = {

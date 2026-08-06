@@ -15,6 +15,9 @@ interface UseTTSOptions {
 export const useTTS = (options: UseTTSOptions = {}) => {
   const { apiBase = TTS_CONFIG.BASE_URL, onPlaybackDone } = options;
   const [isPlaying, setIsPlaying] = useState(false);
+  // 与 isPlaying 同步的 ref：state 在回调闭包里会读到旧值，
+  // 调用方需要一个「此刻是否还在放」的可靠读法
+  const isPlayingRef = useRef(false);
 
   // WebAudio refs
   const audioCtxRef = useRef<AudioContext | null>(null);
@@ -108,6 +111,7 @@ export const useTTS = (options: UseTTSOptions = {}) => {
   const processQueue = async () => {
     if (isProcessingRef.current) return;
     isProcessingRef.current = true;
+    isPlayingRef.current = true;
     setIsPlaying(true);
 
     window.dispatchEvent(new CustomEvent('tts-start'));
@@ -118,6 +122,7 @@ export const useTTS = (options: UseTTSOptions = {}) => {
     }
 
     isProcessingRef.current = false;
+    isPlayingRef.current = false;
     setIsPlaying(false);
 
     window.dispatchEvent(new CustomEvent('tts-end'));
@@ -148,9 +153,10 @@ export const useTTS = (options: UseTTSOptions = {}) => {
       audioCtxRef.current = null;
     }
     setIsPlaying(false);
+    isPlayingRef.current = false;
     isProcessingRef.current = false;
     window.dispatchEvent(new CustomEvent('tts-end'));
   }, []);
 
-  return { speak, stop, isPlaying };
+  return { speak, stop, isPlaying, isPlayingRef };
 };

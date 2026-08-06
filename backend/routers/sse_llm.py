@@ -19,7 +19,8 @@ llm_service: LLMService = None
 class LLMRequest(BaseModel):
     text:       str  = Field(...,         description="STEP 1 转录文本")
     emotion:    dict = Field(...,         description="STEP 2 EmotionResult 序列化字典")
-    session_id: str  = Field(default='default', description="会话 ID")
+    session_id: str  = Field(default='default', description="会话 ID（每次对话新生成，隔离会话级状态）")
+    elder_id:   str  = Field(default='default_elder', description="老人 ID（跨会话稳定，长程记忆按它归档）")
 
 
 # ─── 路由 ────────────────────────────────────────────────────────────────────
@@ -39,7 +40,9 @@ async def stream_reply(req: LLMRequest):
 
     async def generate():
         try:
-            async for chunk in llm_service.stream_reply(req.text, req.emotion, req.session_id):
+            async for chunk in llm_service.stream_reply(
+                req.text, req.emotion, req.session_id, req.elder_id,
+            ):
                 # SSE 格式：每条消息 "data: <json>\n\n"
                 yield f"data: {json.dumps(chunk, ensure_ascii=False)}\n\n"
         except Exception as e:
@@ -56,12 +59,61 @@ async def stream_reply(req: LLMRequest):
     )
 
 
+@router.post('/llm/closing')
+async def stream_closing(session_id: str = 'default', elder_id: str = 'default_elder'):
+    """
+    结束对话前的收束仪式：回顾今天聊到的 → 肯定 → 道别 → 约定下次。
+
+    事件结构与 /llm/stream 一致（meta → delta... → done），前端复用同一条
+    播放通路即可。应在 /llm/reset 之前调用——reset 会清掉本次的滚动摘要，
+    而收尾正是靠那份摘要来做回顾的。
+    """
+    if llm_service is None:
+        return {"error": "LLMService not initialized"}
+
+    async def generate():
+        try:
+            async for chunk in llm_service.stream_closing(session_id, elder_id):
+                yield f"data: {json.dumps(chunk, ensure_ascii=False)}\n\n"
+        except Exception as e:
+            logger.error(f"Closing stream error: {e}", exc_info=True)
+            yield f"data: {json.dumps({'type': 'error', 'message': str(e)}, ensure_ascii=False)}\n\n"
+
+    return StreamingResponse(
+        generate(),
+        media_type='text/event-stream',
+        headers={
+            'Cache-Control':     'no-cache',
+            'X-Accel-Buffering': 'no',
+        },
+    )
+
+
 @router.post('/llm/reset')
-async def reset_session(session_id: str = 'default'):
-    """重置对话历史。"""
+async def reset_session(session_id: str = 'default', elder_id: str = ''):
+    """
+    结束/重置一次会话。
+
+    传了 elder_id 时，会先把本次对话的滚动摘要留档进长程台账（供下次回指
+    「上次咱们聊到…」），再清空会话级状态。
+    """
     if llm_service:
+        await llm_service.close_session(session_id, elder_id)
         llm_service.reset(session_id)
     return {'status': 'ok', 'session_id': session_id}
+
+
+@router.post('/llm/crisis/escalate')
+async def escalate_to_caregiver(session_id: str = 'default'):
+    """
+    界面上点击「联系护理员」时调用，写一条护工升级事件。
+
+    与自动检测出的危机事件写到同一个目录，护工端只需轮询一处。
+    """
+    if llm_service is None:
+        return {'status': 'error', 'message': 'LLMService not initialized'}
+    event = llm_service.dispatch_escalation(session_id)
+    return {'status': 'ok', 'event': event}
 
 
 @router.get('/llm/history')

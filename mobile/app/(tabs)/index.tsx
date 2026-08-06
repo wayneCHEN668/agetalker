@@ -1,7 +1,8 @@
-import React, { useState, useCallback, useRef } from 'react';
-import { StyleSheet, View, SafeAreaView } from 'react-native';
+import React, { useState, useCallback, useRef, useEffect } from 'react';
+import { StyleSheet, View, SafeAreaView, Text, TouchableOpacity } from 'react-native';
 import { Design } from '@/constants/Design';
 import { CATEGORY_ZH_MAP } from '@/constants/Category';
+import { newSessionId } from '@/constants/Session';
 import { StatusBar } from '@/components/StatusBar';
 import { TranscriptArea } from '@/components/TranscriptArea';
 import { Waveform } from '@/components/Waveform';
@@ -24,11 +25,26 @@ export default function HomeScreen() {
   // 跟踪流式 AI 消息在 messages 中的索引
   const streamingIndexRef = useRef<number | null>(null);
 
+  // 本次对话的会话 ID：每次开始对话新生成，ASR / 情绪 / LLM 三处共用同一个键
+  const sessionIdRef = useRef<string>('');
+
+  // 正在走结束流程（收束告别播放中）。只有这个标志为真时，TTS 播放队列
+  // 排空才意味着「该清屏了」——平时每轮回复播完也会排空，不能一概处理。
+  const isEndingRef = useRef(false);
+  // 告别的**文字**流是否已经结束（语音是否放完是另一个条件，见 finishEndSession）
+  const closingTextDoneRef = useRef(false);
+  const endFallbackTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  // 用 ref 转一层：finishEndSession 依赖 stopTTS，而 stopTTS 来自 useTTS，
+  // 直接互相引用会成环
+  const onPlaybackDoneRef = useRef<() => void>(() => {});
+
   // 1. TTS
-  const { speak, stop: stopTTS } = useTTS();
+  const { speak, stop: stopTTS, isPlayingRef: ttsPlayingRef } = useTTS({
+    onPlaybackDone: () => onPlaybackDoneRef.current(),
+  });
 
   // 2. LLM
-  const { fetchReply, reset: resetLLM } = useLLM({
+  const { fetchReply, fetchClosing, reset: resetLLM, isCrisis } = useLLM({
     onDelta: (deltaText) => {
       setIsLLMStreaming(true);
       setMessages((prev) => {
@@ -94,7 +110,7 @@ export default function HomeScreen() {
 
         const emotionLabel = emotion?.label || 'neutral';
         setCurrentEmotion(emotionLabel);
-        fetchReply(text, emotion);
+        fetchReply(text, emotion, sessionIdRef.current);
       } else {
         setMessages((prev) => {
           const last = prev[prev.length - 1];
@@ -126,6 +142,19 @@ export default function HomeScreen() {
         doEndSession();
       }
     } else {
+      // 每次开始对话都用全新的 session_id，上一次对话的服务端状态不会残留过来
+      const sessionId = newSessionId();
+      sessionIdRef.current = sessionId;
+
+      // 上一次的结束流程可能还没走完（告别还在播），这里作废掉，
+      // 否则它的收尾清理会在新对话开始后触发、把刚说的话清掉
+      isEndingRef.current = false;
+      closingTextDoneRef.current = false;
+      if (endFallbackTimerRef.current) {
+        clearTimeout(endFallbackTimerRef.current);
+        endFallbackTimerRef.current = null;
+      }
+
       setMessages([]);
       setCurrentEmotion('neutral');
       streamingIndexRef.current = null;
@@ -133,27 +162,102 @@ export default function HomeScreen() {
       setErrorMessage('');
       resetLLM();
       stopTTS();
-      start();
+      start(sessionId);
     }
   }, [isRecording, messages.length]);
 
-  const doEndSession = useCallback(() => {
-    stopASR();
-    stopTTS();
-    setShowEndDialog(false);
-    // 短暂显示告别状态后清除
-    setTimeout(() => {
-      setMessages([]);
-      setCurrentEmotion('neutral');
-      streamingIndexRef.current = null;
-      setIsLLMStreaming(false);
-      resetLLM();
-    }, 2500);
-  }, []);
+  /**
+   * 结束对话。
+   *
+   * 以前是「停掉一切 → 2.5 秒后把屏幕抹掉」。把一段哀伤或抑郁的叙事打开之后
+   * 这样收场，临床上是有害的——不该把一个刚敞开心扉的人就这么晾在那儿。
+   * 现在先播一段收束告别（回顾今天聊到的 → 肯定 → 道别 → 约定下次），
+   * 等它说完再清屏。
+   */
+  /**
+   * 告别真正说完之后的收尾清理。
+   *
+   * 必须同时满足两个条件才算「说完了」：
+   * 1. 文字流结束（closingTextDoneRef）
+   * 2. 语音队列播空（ttsPlayingRef 为 false）
+   *
+   * 只看其中一个都会出错：语音播放常常比 LLM 生成快，队列可能在两段文字之间
+   * 就先空了一次，此时 onPlaybackDone 会提前触发——只看它就会把告别掐断在
+   * 半截上。反过来只看文字流，则会在语音还剩十几秒时就清屏。
+   * 所以这里做成幂等的，两个来源都调它，谁最后满足条件谁真正执行。
+   */
+  const finishEndSession = useCallback(() => {
+    if (!isEndingRef.current) return;      // 不是在结束流程里（普通一轮播完）
+    if (!closingTextDoneRef.current) return; // 文字还没流完
+    if (ttsPlayingRef.current) return;       // 语音还在播
 
-  const auraColors =
-    Design.colors.aura[currentEmotion as keyof typeof Design.colors.aura] ||
-    Design.colors.aura.neutral;
+    isEndingRef.current = false;
+
+    if (endFallbackTimerRef.current) {
+      clearTimeout(endFallbackTimerRef.current);
+      endFallbackTimerRef.current = null;
+    }
+
+    stopTTS();
+    setMessages([]);
+    setCurrentEmotion('neutral');
+    streamingIndexRef.current = null;
+    setIsLLMStreaming(false);
+    // 传 sessionId：把本次摘要留档进长程台账，并释放会话级状态
+    resetLLM(sessionIdRef.current);
+  }, [resetLLM, stopTTS, ttsPlayingRef]);
+
+  // 让 useTTS 的 onPlaybackDone 始终指向最新的 finishEndSession
+  useEffect(() => {
+    onPlaybackDoneRef.current = finishEndSession;
+  }, [finishEndSession]);
+
+  const doEndSession = useCallback(async () => {
+    const sessionId = sessionIdRef.current;
+    stopASR();                 // 先停止收音，但不停 TTS——告别还要靠它说出来
+    setShowEndDialog(false);
+    isEndingRef.current = true;
+    closingTextDoneRef.current = false;
+
+    // 兜底：万一告别一句都没播出来（网络断了、TTS 挂了），
+    // onPlaybackDone 永远不会触发，界面会卡在那儿回不去
+    endFallbackTimerRef.current = setTimeout(() => {
+      closingTextDoneRef.current = true;
+      ttsPlayingRef.current = false;
+      finishEndSession();
+    }, 45000);
+
+    try {
+      await fetchClosing(sessionId);
+    } catch (err) {
+      console.warn('[HomeScreen] 收束告别失败:', err);
+    }
+
+    // fetchClosing 返回只代表**文字**流完了，语音通常还在后台排队播。
+    // 标记文字已完成后再试一次：如果语音也已经播空了（短告别常见），
+    // 这次调用就会真正收尾；否则等 onPlaybackDone 来收。
+    closingTextDoneRef.current = true;
+    finishEndSession();
+  }, [fetchClosing, stopASR, finishEndSession, ttsPlayingRef]);
+
+  // 危机时用暖琥珀色压过情绪光晕：这块屏幕是给正处在危机里的老人看的，
+  // 要的是安全感，不是警报感
+  const auraColors = isCrisis
+    ? Design.colors.aura.crisis
+    : Design.colors.aura[currentEmotion as keyof typeof Design.colors.aura] ||
+      Design.colors.aura.neutral;
+
+  const callCaregiver = useCallback(async () => {
+    try {
+      await fetch(
+        `http://localhost:8050/llm/crisis/escalate?session_id=${encodeURIComponent(sessionIdRef.current)}`,
+        { method: 'POST' },
+      );
+      setErrorMessage('已经通知护理员了，他们马上过来。');
+    } catch {
+      setErrorMessage('没能联系上护理员，请直接按房间里的呼叫铃。');
+    }
+  }, []);
 
   // 构建包含 typing 指示器的消息列表
   const displayMessages = isLLMStreaming && streamingIndexRef.current === null
@@ -172,6 +276,17 @@ export default function HomeScreen() {
         <Waveform isActive={status === 'listening'} analyser={analyser} />
       </View>
 
+      {isCrisis && (
+        <TouchableOpacity
+          style={styles.caregiverButton}
+          onPress={callCaregiver}
+          accessibilityRole="button"
+          accessibilityLabel="联系护理员"
+        >
+          <Text style={styles.caregiverButtonText}>联系护理员</Text>
+        </TouchableOpacity>
+      )}
+
       <ActionButton isRecording={isRecording} onPress={toggleConversation} />
 
       <ErrorToast
@@ -180,13 +295,21 @@ export default function HomeScreen() {
         onDismiss={() => setErrorMessage('')}
       />
 
+      {/*
+        危机时不硬性禁用结束（把人困在界面里同样有害），改为换一套挽留的说法，
+        并把「叫护理员」放在更顺手的位置——目的是不让他一个人待着，不是不让他退出。
+      */}
       <ConfirmDialog
         visible={showEndDialog}
-        title="结束对话"
-        message="今天和您聊天很开心，下次再见。要结束吗？"
-        confirmLabel="结束"
-        cancelLabel="继续聊天"
-        onConfirm={doEndSession}
+        title={isCrisis ? '先别急着走' : '结束对话'}
+        message={
+          isCrisis
+            ? '我有点担心你，不太想让你一个人待着。要不要我帮你把护理员叫过来？'
+            : '今天和您聊天很开心，下次再见。要结束吗？'
+        }
+        confirmLabel={isCrisis ? '叫护理员' : '结束'}
+        cancelLabel={isCrisis ? '再陪我聊会儿' : '继续聊天'}
+        onConfirm={isCrisis ? () => { setShowEndDialog(false); callCaregiver(); } : doEndSession}
         onCancel={() => setShowEndDialog(false)}
       />
     </SafeAreaView>
@@ -205,5 +328,19 @@ const styles = StyleSheet.create({
     height: 100,
     justifyContent: 'center',
     alignItems: 'center',
+  },
+  caregiverButton: {
+    alignSelf: 'center',
+    paddingHorizontal: 32,
+    paddingVertical: 14,
+    borderRadius: Design.layout.radius,
+    backgroundColor: Design.colors.crisis,
+    marginBottom: 12,
+  },
+  caregiverButtonText: {
+    fontFamily: Design.typography.fontFamily,
+    fontSize: 20,
+    fontWeight: '600',
+    color: Design.colors.onPrimary,
   },
 });

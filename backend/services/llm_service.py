@@ -1,6 +1,7 @@
+import asyncio
 import json
 import logging
-from typing import AsyncGenerator
+from typing import AsyncGenerator, Optional
 from datetime import datetime, timezone, timedelta
 from pathlib import Path
 from openai import AsyncOpenAI
@@ -13,6 +14,7 @@ from config import (
     LLM_TOP_P,
     LLM_MAX_HISTORY_TURNS,
     CRISIS_KEYWORDS,
+    CRISIS_VIGILANCE_TURNS,
     TTS_PARAMS_MAP,
     CATEGORY_TTS_PARAMS_MAP,
     DEEPSEEK_API_KEY,
@@ -22,10 +24,15 @@ from config import (
     ROUTER_MAX_TOKENS,
     ROUTER_CONTEXT_TURNS,
     ROUTER_EXTRA_BODY,
+    MEMORY_SUMMARY_EVERY_N_MSGS,
+    SESSION_OPENING_TURNS,
+    SESSION_CLOSING_AFTER_MIN,
+    MAX_CONSECUTIVE_QUESTIONS,
 )
 from prompts.templates import (
     build_normal_prompt,
     build_crisis_prompt,
+    build_closing_prompt,
     ROUTER_SYSTEM_PROMPT,
     build_router_user_prompt,
     resolve_strategy_id,
@@ -34,9 +41,19 @@ from prompts.templates import (
 
 logger = logging.getLogger(__name__)
 
-# 每个会话、每个类别最多保留多少条"已用策略"记录。只是为了不让长会话里这个列表
-# 无限增长、拖累路由 prompt 的 token 量，不是业务上的限制。
-_MAX_STRATEGY_HISTORY_PER_CATEGORY = 8
+# 情绪效价（valence）变化到多少算"好转"/"下降"。低于这个幅度视为持平——
+# 单轮 valence 本来就有噪声，阈值太小会把噪声当成效果。
+_VALENCE_IMPROVED_DELTA = 0.10
+_VALENCE_WORSENED_DELTA = -0.10
+
+
+def _grade_effect(delta: float) -> str:
+    """把两轮之间的 valence 变化归成三档，供路由判断要不要推进策略。"""
+    if delta >= _VALENCE_IMPROVED_DELTA:
+        return '好转'
+    if delta <= _VALENCE_WORSENED_DELTA:
+        return '下降'
+    return '持平'
 
 
 class LLMService:
@@ -70,7 +87,14 @@ class LLMService:
       中性的话识别成"同一段叙事的延续"，而不是逐句独立判断导致中途误判成 neutral。
     """
 
-    def __init__(self):
+    def __init__(self, memory_service=None):
+        # 长程记忆服务（MemoryService）。为 None 时整套记忆逻辑静默跳过，
+        # 对话本身照常工作——记忆是增强能力，不是对话的前置依赖。
+        self.memory = memory_service
+        # 后台任务引用：asyncio 只持弱引用，不自己存着的话任务可能被 GC 掉
+        self._bg_tasks: set = set()
+        # 已滑出历史窗口、等待压缩进摘要的消息：{session_id: [msg, ...]}
+        self._pending_summary: dict[str, list[dict]] = {}
         self.client = AsyncOpenAI(
             api_key  = DASHSCOPE_API_KEY,
             base_url = QWEN_BASE_URL,
@@ -82,12 +106,19 @@ class LLMService:
         )
         # 对话历史：{session_id: [{'role': 'user'|'assistant', 'content': str}, ...]}
         self.sessions: dict[str, list[dict]] = {}
-        # 策略延续状态：{session_id: {category: [已用 strategy_id, ...]}}
-        self.strategy_history: dict[str, dict[str, list[str]]] = {}
+        # 策略延续状态：{session_id: {category: {strategy_id: {'count', 'last_effect'}}}}
+        self.strategy_history: dict[str, dict[str, dict[str, dict]]] = {}
+        # 上一轮选中的策略及选它时的情绪 valence，用于下一轮结算效果
+        self.last_strategy: dict[str, dict] = {}
         # 类别延续状态：{session_id: 上一轮判定的 category}（crisis 轮不更新这个值，
         # 危机结束后恢复正常对话时，应该参考的是危机发生前的类别，不是 "crisis" 本身）
         self.last_category: dict[str, str] = {}
-        logger.info("LLM 服务初始化完成 ✅ (生成: Qwen/AsyncOpenAI | 路由: DeepSeek/AsyncOpenAI | 策略延续: 已启用 | 类别延续: 已启用)")
+        # 危机警惕期剩余轮数：{session_id: 剩余轮数}。命中危机时置为
+        # CRISIS_VIGILANCE_TURNS，之后每轮递减到 0。见 _resolve_crisis_state()。
+        self.crisis_vigilance: dict[str, int] = {}
+        # 会话弧线状态：{session_id: {started_at, turn_count, consecutive_questions}}
+        self.session_meta: dict[str, dict] = {}
+        logger.info("LLM 服务初始化完成 ✅ (生成: Qwen/AsyncOpenAI | 路由: DeepSeek/AsyncOpenAI | 策略延续: 已启用 | 类别延续: 已启用 | 危机警惕期: 已启用)")
 
     # ─── 路由 LLM ───────────────────────────────────────────────────────────
 
@@ -97,6 +128,8 @@ class LLMService:
         context: str = "",
         last_category: str = "",
         used_strategies: str = "",
+        crisis_recent: bool = False,
+        strategy_feedback: str = "",
     ) -> tuple[str, str, str]:
         """
         调用独立的路由模型（DeepSeek），判断当前这句话的心理类别，并选出这一轮
@@ -119,6 +152,9 @@ class LLMService:
                 才能让它正确识别"同一段叙事的延续"。
             used_strategies: 这个会话里各类别已用过的策略 id（由 _format_used_strategies
                 构建），供路由模型参考"该不该推进到下一步"，不是必须避开的黑名单。
+            crisis_recent: 是否处于危机警惕期。为 True 时提示路由在"退出敏感类别"
+                上更保守——刚出过高危信号的对话里，一句表面平静的话不足以证明
+                风险已经过去。
 
         Returns:
             (category, matched_signals, strategy_id)
@@ -136,6 +172,8 @@ class LLMService:
                         conversation_context=context,
                         last_category=last_category,
                         used_strategies=used_strategies,
+                        crisis_recent=crisis_recent,
+                        strategy_feedback=strategy_feedback,
                     )},
                 ],
                 temperature = ROUTER_TEMPERATURE,
@@ -200,27 +238,157 @@ class LLMService:
 
     def _format_used_strategies(self, session_id: str) -> str:
         """
-        把这个会话各类别已用过的策略 id 拼成字符串，传给路由模型做参考。
+        把这个会话各类别已用过的策略拼成字符串，传给路由模型做参考。
 
-        格式形如 "anger：[pause_breathe,pause_breathe,uncover_need]"，重复出现
-        说明这条策略被连续用了多次，这是有意保留的信息（不去重），让路由模型
-        能判断"这条策略已经反复用了，是不是该推进了"。
+        格式形如 "anger：pause_breathe×3(上次持平)，uncover_need×1(上次好转)"。
+
+        以前这里存的是一条条原始记录的列表、并且按最近 8 条截断——一小时对话里
+        某个类别可能被访问 30 次以上，早期记录会滚出窗口，路由于是"忘了"开头
+        用过什么，第 50 分钟又从第一条策略重新做一遍。现在按 strategy_id 聚合
+        成"次数 + 最近一次效果"，条目数天然不超过该类别的策略条数（≤6），
+        再长的会话也不会滚掉。
         """
         history = self.strategy_history.get(session_id)
         if not history:
             return ''
-        parts = [f"{cat}：[{','.join(ids)}]" for cat, ids in history.items() if ids]
+        parts = []
+        for cat, stats in history.items():
+            if not stats:
+                continue
+            items = ', '.join(
+                f"{sid}×{s['count']}"
+                + (f"(上次{s['last_effect']})" if s.get('last_effect') else '')
+                for sid, s in stats.items()
+            )
+            parts.append(f"{cat}：{items}")
         return '；'.join(parts)
 
-    def _record_strategy_use(self, session_id: str, category: str, strategy_id: str):
+    def _settle_last_strategy(self, session_id: str, emotion: dict) -> str:
         """
-        记录这一轮实际生效的策略 id（必须是 resolve_strategy_id() 兜底之后的值，
+        结算上一轮策略的效果，并返回一句给路由看的反馈描述。
+
+        情绪服务算出的 valence 是判断"上一步干预有没有起作用"唯一的客观信号，
+        但它以前只被送去生成模型当语气参考，从没送达路由——于是路由每轮都在
+        没有任何效果反馈的情况下决定要不要推进策略，等于开环。这里把它接上。
+        """
+        last = self.last_strategy.get(session_id)
+        if not last:
+            return ''
+
+        current_valence = float(emotion.get('valence', 0.5))
+        effect = _grade_effect(current_valence - last['valence'])
+
+        stats = (
+            self.strategy_history
+            .setdefault(session_id, {})
+            .setdefault(last['category'], {})
+            .get(last['strategy_id'])
+        )
+        if stats is not None:
+            stats['last_effect'] = effect
+
+        return f"{last['strategy_id']}（{last['category']}）用完之后，情绪{effect}"
+
+    # ─── 会话弧线与节奏 ─────────────────────────────────────────────────────
+
+    def _get_session_meta(self, session_id: str) -> dict:
+        """取会话弧线状态，首轮时初始化。"""
+        if session_id not in self.session_meta:
+            self.session_meta[session_id] = {
+                'started_at': datetime.now(timezone.utc),
+                'turn_count': 0,
+                'consecutive_questions': 0,
+            }
+        return self.session_meta[session_id]
+
+    def get_phase(self, session_id: str) -> str:
+        """
+        当前会话阶段：opening / deepening / closing。
+
+        暖场按轮数判定（前几轮），收束按时长判定（聊了多久）——一小时的对话
+        该不该收尾，取决于过了多长时间，而不是说了多少句。
+        """
+        meta = self._get_session_meta(session_id)
+        elapsed_min = (
+            datetime.now(timezone.utc) - meta['started_at']
+        ).total_seconds() / 60.0
+        if elapsed_min >= SESSION_CLOSING_AFTER_MIN:
+            return 'closing'
+        if meta['turn_count'] < SESSION_OPENING_TURNS:
+            return 'opening'
+        return 'deepening'
+
+    def _should_restrain_questions(self, session_id: str) -> bool:
+        """连续以问句收尾达到阈值时，这一轮跳过 CARE 的 E 步骤。"""
+        return self._get_session_meta(session_id)['consecutive_questions'] >= MAX_CONSECUTIVE_QUESTIONS
+
+    def _note_reply_shape(self, session_id: str, reply: str):
+        """记录这条回复是不是以问句结尾，供下一轮判断要不要收着点问。"""
+        meta = self._get_session_meta(session_id)
+        if reply.rstrip().endswith(('？', '?')):
+            meta['consecutive_questions'] += 1
+        else:
+            meta['consecutive_questions'] = 0
+
+    # ─── 后台任务 ───────────────────────────────────────────────────────────
+
+    def _spawn_bg(self, coro):
+        """
+        起一个后台任务并持有引用。
+
+        记忆的抽取和摘要都放在这里跑，不占当轮回复的关键路径——代价只是本轮
+        说的事实从下一轮开始可用，对连贯性没有实质影响。
+        """
+        task = asyncio.create_task(coro)
+        self._bg_tasks.add(task)
+        task.add_done_callback(self._bg_tasks.discard)
+
+    def _schedule_memory_work(
+        self,
+        elder_id: str,
+        session_id: str,
+        user_text: str,
+        dropped: list[dict],
+        crisis: bool,
+    ):
+        """安排本轮的记忆后台工作：事实抽取 + （必要时）滚动摘要压缩。"""
+        if self.memory is None:
+            return
+
+        # 危机轮次不写入长程记忆。
+        # 对话历史里仍然保留（下一轮需要这个语境，抹掉反而更危险），但不让危机
+        # 内容沉淀成跨会话的永久记录，以后也不会被回指出来。
+        if not crisis:
+            self._spawn_bg(self.memory.observe_turn(elder_id, user_text))
+
+        if dropped:
+            pending = self._pending_summary.setdefault(session_id, [])
+            pending.extend(dropped)
+            # 攒够一批再压缩，避免历史满了之后每轮都多一次 LLM 调用
+            if len(pending) >= MEMORY_SUMMARY_EVERY_N_MSGS:
+                batch = list(pending)
+                pending.clear()
+                self._spawn_bg(self.memory.fold_into_summary(session_id, batch))
+
+    def _record_strategy_use(
+        self, session_id: str, category: str, strategy_id: str, emotion: dict,
+    ):
+        """
+        记录这一轮实际生效的策略（必须是 resolve_strategy_id() 兜底之后的值，
         不能是路由模型原始返回的、可能无效的值），供下一轮路由判断参考。
+
+        同时记下选这条策略时的 valence——下一轮拿新的 valence 和它比，就知道
+        这一步到底有没有起作用（见 _settle_last_strategy）。
         """
-        per_session = self.strategy_history.setdefault(session_id, {})
-        used = per_session.setdefault(category, [])
-        used.append(strategy_id)
-        used[:] = used[-_MAX_STRATEGY_HISTORY_PER_CATEGORY:]
+        per_category = self.strategy_history.setdefault(session_id, {}).setdefault(category, {})
+        stats = per_category.setdefault(strategy_id, {'count': 0, 'last_effect': ''})
+        stats['count'] += 1
+
+        self.last_strategy[session_id] = {
+            'category': category,
+            'strategy_id': strategy_id,
+            'valence': float(emotion.get('valence', 0.5)),
+        }
 
     # ─── 主入口：流式生成回复 ────────────────────────────────────────────────
 
@@ -228,7 +396,8 @@ class LLMService:
         self,
         user_text: str,
         emotion:   dict,
-        session_id: str = 'default'
+        session_id: str = 'default',
+        elder_id:   str = 'default_elder',
     ) -> AsyncGenerator[dict, None]:
         """
         流式生成心理回复。
@@ -245,7 +414,8 @@ class LLMService:
         Args:
             user_text: STEP 1 转录文本
             emotion:   STEP 2 情绪结果字典（仅用于语气措辞和 TTS 参数，不参与类别路由判断）
-            session_id: 会话 ID
+            session_id: 会话 ID（每次对话新生成，隔离对话历史/策略延续/类别延续）
+            elder_id:   老人 ID（跨会话稳定，长程记忆按它归档）
 
         Yields:
             {'type': 'delta',  'text': str,       'crisis': bool}
@@ -265,6 +435,8 @@ class LLMService:
         strategy_id = ''
         strategy_name = ''
         crisis = self._check_crisis(user_text)
+        # 本轮开始时是否已处于警惕期——要在下面可能重新置位之前先取出来
+        crisis_vigilant = self._is_crisis_vigilant(session_id)
         if crisis:
             logger.warning(f"⚠️  危机信号触发 (关键词) | Session: {session_id} | 文本: {user_text[:50]}")
             self._dispatch_crisis_event(user_text, session_id)
@@ -274,8 +446,12 @@ class LLMService:
             context = self._build_router_context(conversation, ROUTER_CONTEXT_TURNS)
             used_strategies = self._format_used_strategies(session_id)
             last_category = self.last_category.get(session_id, '')
+            # 先结算上一条策略的效果，再让路由决定这一轮该不该往下推进
+            strategy_feedback = self._settle_last_strategy(session_id, emotion)
             category, matched_signals, raw_strategy_id = await self._route_category(
-                user_text, context, last_category, used_strategies
+                user_text, context, last_category, used_strategies,
+                crisis_recent=crisis_vigilant,
+                strategy_feedback=strategy_feedback,
             )
             if category == 'crisis':
                 crisis = True
@@ -286,7 +462,7 @@ class LLMService:
             else:
                 # 兜底校验，记录的必须是这个最终生效的值，不是路由原始返回值
                 strategy_id = resolve_strategy_id(category, raw_strategy_id)
-                self._record_strategy_use(session_id, category, strategy_id)
+                self._record_strategy_use(session_id, category, strategy_id, emotion)
                 # 查找策略中文名（供前端展示，避免前端再维护一份策略名称映射）
                 _cat_cfg = CATEGORY_STRATEGY_MAP.get(category, CATEGORY_STRATEGY_MAP['neutral'])
                 _strategy = next(
@@ -299,18 +475,53 @@ class LLMService:
                 # 里，传给路由当 last_category 它也认不出来）
                 self.last_category[session_id] = category
 
+        # ── 步骤 3.5：更新危机警惕期状态 ─────────────────────────────────────
+        if crisis:
+            # 本轮走完整危机 prompt，不需要再叠加警惕段；警惕期从下一轮开始生效
+            self._enter_crisis_vigilance(session_id)
+            crisis_vigilant = False
+        else:
+            self._decay_crisis_vigilance(session_id)
+
         # ── 步骤 4：构建 System Prompt ──────────────────────────────────────
         if crisis:
             system_prompt = build_crisis_prompt()
         else:
-            system_prompt = build_normal_prompt(category, emotion, matched_signals, strategy_id)
+            system_prompt = build_normal_prompt(
+                category, emotion, matched_signals, strategy_id, crisis_vigilant,
+                memory_context  = self.memory.get_context(elder_id) if self.memory else '',
+                session_summary = self.memory.get_summary(session_id) if self.memory else '',
+                phase              = self.get_phase(session_id),
+                restrain_questions = self._should_restrain_questions(session_id),
+            )
+            if crisis_vigilant:
+                logger.info(f"危机警惕期生效 | Session: {session_id} | 剩余 {self.crisis_vigilance.get(session_id, 0)} 轮")
+
+        # ── 步骤 4.5：先发 meta 事件（解锁前端逐句 TTS 流水线）───────────────
+        # category / strategy_name / tts_params 在这里已经全部算出来了，早于调用
+        # 生成模型。提前发给前端，前端才能在流式输出过程中「凑满一句就合成一句」，
+        # 不必等整段生成结束——后者每轮多出好几秒静默，一小时对话里累积起来是
+        # 体验上最伤的一处（设计文档 §4.2 要求的首句流水线）。
+        # done 事件仍携带同样字段，老前端不受影响。
+        yield {
+            'type':          'meta',
+            'crisis':        crisis,
+            'category':      category if not crisis else 'crisis',
+            'strategy_id':   strategy_id,
+            'strategy_name': strategy_name,
+            'tts_params':    self._get_tts_params_by_category(category, crisis),
+        }
 
         # ── 步骤 5：追加用户消息到历史 ──────────────────────────────────────
         conversation.append({'role': 'user', 'content': user_text})
 
         # ── 步骤 6：裁剪历史，保留最近 N 轮 ────────────────────────────────
+        # 被裁掉的消息不是丢掉就完了——它们会被压缩进滚动摘要，这是长对话里
+        # 「前面聊过什么」唯一的去处
         max_msgs = LLM_MAX_HISTORY_TURNS * 2
+        dropped: list[dict] = []
         if len(conversation) > max_msgs:
+            dropped = conversation[:-max_msgs]
             self.sessions[session_id] = conversation[-max_msgs:]
             conversation = self.sessions[session_id]
 
@@ -352,6 +563,12 @@ class LLMService:
             conversation.append(
                 {'role': 'assistant', 'content': full_reply}
             )
+            self._note_reply_shape(session_id, full_reply)
+
+        self._get_session_meta(session_id)['turn_count'] += 1
+
+        # ── 步骤 10.5：安排记忆的后台工作（不阻塞本轮回复）────────────────────
+        self._schedule_memory_work(elder_id, session_id, user_text, dropped, crisis)
 
         # ── 步骤 11：生成完毕信号 ─────────────────────────────────────────────
         yield {
@@ -364,25 +581,129 @@ class LLMService:
             'tts_params':    self._get_tts_params_by_category(category, crisis),
         }
 
+    # ─── 收束仪式 ───────────────────────────────────────────────────────────
+
+    async def stream_closing(
+        self,
+        session_id: str = 'default',
+        elder_id:   str = 'default_elder',
+    ) -> AsyncGenerator[dict, None]:
+        """
+        流式生成一段收尾告别。
+
+        以前"结束对话"就是 2.5 秒后把界面清空。把一段哀伤或抑郁的叙事打开之后
+        这样收场，临床上是有害的——你不会把一个刚敞开心扉的人晾在那儿。这里
+        用本次会话的摘要生成一段有回顾、有肯定、有约定的告别。
+
+        事件结构和 stream_reply 一致（meta → delta... → done），前端可以直接
+        复用同一条播放通路。
+        """
+        summary = self.memory.get_summary(session_id) if self.memory else ''
+        context = self.memory.get_context(elder_id) if self.memory else ''
+        system_prompt = build_closing_prompt(summary, context)
+
+        # 告别一律用最平缓的语气，不跟着当前类别走
+        tts_params = CATEGORY_TTS_PARAMS_MAP['neutral']
+        yield {
+            'type': 'meta', 'crisis': False, 'category': 'closing',
+            'strategy_id': '', 'strategy_name': '道别', 'tts_params': tts_params,
+        }
+
+        try:
+            stream = await self.client.chat.completions.create(
+                model       = QWEN_MODEL,
+                messages    = [
+                    {'role': 'system', 'content': system_prompt},
+                    {'role': 'user',   'content': '我们今天就聊到这儿吧。'},
+                ],
+                stream      = True,
+                max_tokens  = LLM_MAX_TOKENS,
+                temperature = LLM_TEMPERATURE,
+                top_p       = LLM_TOP_P,
+            )
+        except Exception as e:
+            logger.error(f"收尾生成失败 (Session: {session_id}): {e}")
+            # 生成失败也不能没有告别——退回一句固定的
+            fallback = '今天跟你聊得挺好的。你早点歇着，明儿这个点我还在这儿。'
+            yield {'type': 'delta', 'text': fallback, 'crisis': False}
+            yield {'type': 'done', 'full_text': fallback, 'crisis': False,
+                   'category': 'closing', 'strategy_id': '', 'strategy_name': '道别',
+                   'tts_params': tts_params}
+            return
+
+        full_reply = ''
+        async for chunk in stream:
+            delta_text = chunk.choices[0].delta.content or ''
+            if delta_text:
+                full_reply += delta_text
+                yield {'type': 'delta', 'text': delta_text, 'crisis': False}
+
+        yield {
+            'type': 'done', 'full_text': full_reply, 'crisis': False,
+            'category': 'closing', 'strategy_id': '', 'strategy_name': '道别',
+            'tts_params': tts_params,
+        }
+
     # ─── 危机检测 ───────────────────────────────────────────────────────────
 
     def _check_crisis(self, text: str) -> bool:
         """关键词匹配危机检测。零延迟，不依赖任何 LLM 调用。"""
         return any(kw in text for kw in CRISIS_KEYWORDS)
 
-    def _dispatch_crisis_event(self, user_text: str, session_id: str):
-        """
-        危机事件分发。
+    # ─── 危机警惕期（设计文档 §9.3）────────────────────────────────────────────
+    #
+    # 命中危机的那一轮走完整的危机 prompt；之后 CRISIS_VIGILANCE_TURNS 轮即使
+    # 不再出现危机信号，也在常规 prompt 上叠加一段警惕说明。
+    #
+    # 这里刻意只做「按轮数自然衰减」，不做「路由判定情绪好转就提前解除」：
+    # 刚经历过高危信号的人，表面上说「我没事了」恰恰是最典型的表现，用这个信号
+    # 提前解除警惕，等于在最不该松手的时候松手。多警惕两轮的代价远小于反过来。
 
-        当前实现：结构化日志 + JSON 事件文件（供监控/通知服务轮询）。
-        后续接入家庭沟通模块时，替换为 MQTT/Webhook/推送调用。
-        """
-        event = {
+    def _is_crisis_vigilant(self, session_id: str) -> bool:
+        """当前是否处于危机警惕期。"""
+        return self.crisis_vigilance.get(session_id, 0) > 0
+
+    def _enter_crisis_vigilance(self, session_id: str):
+        """命中危机，开启/重置警惕期。"""
+        self.crisis_vigilance[session_id] = CRISIS_VIGILANCE_TURNS
+
+    def _decay_crisis_vigilance(self, session_id: str):
+        """未命中危机的一轮，警惕期计数递减。"""
+        remaining = self.crisis_vigilance.get(session_id, 0)
+        if remaining > 0:
+            self.crisis_vigilance[session_id] = remaining - 1
+
+    def _dispatch_crisis_event(self, user_text: str, session_id: str):
+        """自动检测到危机信号时分发事件。"""
+        self._write_event({
             'type':       'crisis_alert',
             'session_id': session_id,
             'user_text':  user_text[:100],
-            'timestamp':  datetime.now(timezone(timedelta(hours=8))).isoformat(),
-        }
+        })
+
+    def dispatch_escalation(self, session_id: str, source: str = 'ui') -> dict:
+        """
+        界面上主动点击「联系护理员」时分发事件。
+
+        和自动检测出的危机走同一个出口——护工端轮询一个目录就能同时拿到
+        「系统判定的危机」和「本人主动求助」两类事件。
+        """
+        return self._write_event({
+            'type':       'caregiver_requested',
+            'session_id': session_id,
+            'source':     source,
+        })
+
+    def _write_event(self, event: dict) -> dict:
+        """
+        事件分发的统一出口。
+
+        当前实现：结构化日志 + JSON 事件文件（供监控/通知服务轮询）。
+        后续接入家庭沟通模块时，只需要替换这一个方法为 MQTT/Webhook/推送调用。
+
+        文件名里带上事件类型，避免同一秒内的两类事件互相覆盖。
+        """
+        event['timestamp'] = datetime.now(timezone(timedelta(hours=8))).isoformat()
         # 1. 结构化日志（供日志系统采集）
         logger.critical(f"CRISIS_EVENT: {json.dumps(event, ensure_ascii=False)}")
         # 2. 事件文件（供外部监控轮询，如护工端 App）
@@ -390,12 +711,13 @@ class LLMService:
             events_dir = Path('data/crisis_events')
             events_dir.mkdir(parents=True, exist_ok=True)
             ts = event['timestamp'][:19].replace(':', '-')
-            event_file = events_dir / f"{ts}_{session_id}.json"
+            event_file = events_dir / f"{ts}_{event['session_id']}_{event['type']}.json"
             event_file.write_text(json.dumps(event, ensure_ascii=False, indent=2),
                                  encoding='utf-8')
-            logger.info(f"危机事件已写入: {event_file}")
+            logger.info(f"事件已写入: {event_file}")
         except Exception as e:
-            logger.error(f"写入危机事件文件失败: {e}")
+            logger.error(f"写入事件文件失败: {e}")
+        return event
 
     # ─── TTS 参数 ────────────────────────────────────────────────────────────
 
@@ -414,13 +736,33 @@ class LLMService:
 
     # ─── 会话管理 ────────────────────────────────────────────────────────────
 
+    async def close_session(self, session_id: str = 'default', elder_id: str = ''):
+        """
+        会话正常结束时调用：把还没压缩的历史并进摘要，再把本次摘要留档进台账。
+
+        必须在 reset() 之前调用——reset() 会把滚动摘要一起清掉。留档之后，
+        下一次对话就能回指「上次咱们聊到…」。
+        """
+        if self.memory is None or not elder_id:
+            return
+        pending = self._pending_summary.pop(session_id, [])
+        if pending:
+            await self.memory.fold_into_summary(session_id, pending)
+        self.memory.close_session(elder_id, session_id)
+
     def reset(self, session_id: str = 'default'):
         """重置指定会话的对话历史、策略延续状态和类别延续状态。"""
         had_session = session_id in self.sessions
         if had_session:
             self.sessions[session_id].clear()
         self.strategy_history.pop(session_id, None)
+        self.last_strategy.pop(session_id, None)
         self.last_category.pop(session_id, None)
+        self.crisis_vigilance.pop(session_id, None)
+        self.session_meta.pop(session_id, None)
+        self._pending_summary.pop(session_id, None)
+        if self.memory is not None:
+            self.memory.reset_session(session_id)
         if had_session:
             logger.info(f"会话 {session_id} 历史与延续状态已重置")
         else:

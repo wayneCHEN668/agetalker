@@ -41,6 +41,11 @@ logger = logging.getLogger(__name__)
 # 结果回调签名：async def callback(text: str, is_final: bool)
 ASRResultCallback = Callable[[str, bool], Awaitable[None]]
 
+# 断连回调签名：async def callback()
+# 云端会话在长对话里会因为超时/网络抖动断开，断了必须让路由层知道去重建，
+# 否则老人还在说话、系统却已经聋了，而且前端完全看不出来。
+ASRDisconnectCallback = Callable[[], Awaitable[None]]
+
 
 # ─── 云端 ASR 后端 ────────────────────────────────────────────────────────────
 
@@ -76,6 +81,7 @@ class CloudASRBackend:
         session_id: str,
         result_callback: ASRResultCallback,
         event_loop: asyncio.AbstractEventLoop,
+        disconnect_callback: Optional[ASRDisconnectCallback] = None,
     ) -> None:
         """为指定会话创建并启动一个流式 Recognition 实例。
 
@@ -83,9 +89,11 @@ class CloudASRBackend:
             session_id: 会话唯一标识。
             result_callback: async 回调函数 (text, is_final)。
             event_loop: FastAPI 的事件循环，用于跨线程调度回调。
+            disconnect_callback: async 回调函数，在云端连接非正常断开时触发，
+                供路由层重建会话。
         """
         cb = _RecognitionCallbackAdapter(
-            session_id, result_callback, event_loop,
+            session_id, result_callback, event_loop, disconnect_callback,
         )
         recognition = Recognition(
             model=ASR_CLOUD_MODEL,
@@ -123,6 +131,9 @@ class CloudASRBackend:
         """
         session = self._sessions.pop(session_id, None)
         if session:
+            # 先摘掉断连回调再 stop()，否则我们自己发起的正常关闭
+            # 会被 on_close 当成异常断开，触发一次多余的重建
+            session['callback_adapter'].deactivate()
             try:
                 session['recognition'].stop()
             except Exception as e:
@@ -152,11 +163,27 @@ class _RecognitionCallbackAdapter(RecognitionCallback):
         session_id: str,
         async_callback: ASRResultCallback,
         event_loop: asyncio.AbstractEventLoop,
+        disconnect_callback: Optional[ASRDisconnectCallback] = None,
     ):
         super().__init__()
         self._session_id = session_id
         self._async_callback = async_callback
         self._loop = event_loop
+        self._disconnect_callback = disconnect_callback
+        # 是否仍在服役。正常关闭前由 deactivate() 置 False，用来区分
+        # 「我们主动停的」和「云端自己断的」——只有后者才需要重建。
+        self._active = True
+
+    def deactivate(self) -> None:
+        """标记为正常关闭，后续的 on_close/on_error 不再触发重建。"""
+        self._active = False
+
+    def _signal_disconnect(self) -> None:
+        """把断连事件从 SDK 线程投递到 asyncio 事件循环。"""
+        if not self._active or self._disconnect_callback is None:
+            return
+        self._active = False   # 只触发一次，避免 error + close 连发导致重复重建
+        asyncio.run_coroutine_threadsafe(self._disconnect_callback(), self._loop)
 
     def on_open(self) -> None:
         logger.debug(f"Cloud ASR 连接已打开: {self._session_id}")
@@ -178,9 +205,13 @@ class _RecognitionCallbackAdapter(RecognitionCallback):
     def on_error(self, result) -> None:
         msg = getattr(result, 'message', str(result))
         logger.error(f"Cloud ASR 错误 ({self._session_id}): {msg}")
+        self._signal_disconnect()
 
     def on_close(self) -> None:
         logger.debug(f"Cloud ASR 连接已关闭: {self._session_id}")
+        # 走到这里而 _active 仍为 True，说明不是我们主动停的（会话超时、
+        # 网络断开等），需要重建
+        self._signal_disconnect()
 
 
 # ─── 本地 ASR 后端 ────────────────────────────────────────────────────────────
@@ -299,6 +330,7 @@ class ASRService:
         session_id: str,
         result_callback: ASRResultCallback,
         event_loop: asyncio.AbstractEventLoop,
+        disconnect_callback: Optional[ASRDisconnectCallback] = None,
     ) -> str:
         """创建 ASR 会话。返回实际使用的后端名称 ('cloud' | 'local')。
 
@@ -306,7 +338,9 @@ class ASRService:
         """
         if self.cloud:
             try:
-                self.cloud.create_session(session_id, result_callback, event_loop)
+                self.cloud.create_session(
+                    session_id, result_callback, event_loop, disconnect_callback,
+                )
                 self._active_sessions[session_id] = 'cloud'
                 logger.info(f"会话 {session_id} 使用云端 ASR")
                 return 'cloud'

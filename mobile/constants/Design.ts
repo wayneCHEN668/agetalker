@@ -29,6 +29,9 @@ export const Design = {
       fearful:   ['#F0E8EF', '#E0D0E4'],
       disgusted: ['#EEF0E6', '#DDE0CA'],
       surprised: ['#EAF0F5', '#D0DFEC'],
+      // 危机：暖琥珀，取「安全感」而非「警报」。看到这个界面的是正处在
+      // 危机中的老人本人，对他闪红色只会加重恐慌；红色留给护工侧的按钮点缀。
+      crisis:    ['#FFF6EC', '#FFE2C4'],
     },
 
     text: {

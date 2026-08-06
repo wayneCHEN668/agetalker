@@ -300,7 +300,16 @@ def _build_strategy_menu_section() -> str:
         '不要求按顺序推进。如果这句话显示对方还在同一个阶段（比如还在气头上、'
         '还在情绪宣泄），可以继续选同一条策略；只有当内容显示对方已经缓和、'
         '准备往下走了，才换成同一类别里的下一条。已用过的策略只是参考信息，'
-        '不是必须避开的黑名单，重复使用是正常的，只要符合对话当下的状态。'
+        '不是必须避开的黑名单，重复使用是正常的，只要符合对话当下的状态。\n'
+        '\n'
+        '## 效果反馈（有「上一条策略的效果」时，这是推进与否的重要依据）\n'
+        '每条策略本来就是一个分阶段的干预步骤，该不该往下走，要看上一步有没有'
+        '起作用，而不是用过了就翻篇：\n'
+        '- 效果「好转」：这一步起作用了，可以考虑推进到同类别的下一条\n'
+        '- 效果「持平」：还没到位，通常应该继续用同一条，给它多一轮时间\n'
+        '- 效果「下降」：这条路子不对，换同类别里的另一条，不要硬推进到下一条\n'
+        '已用策略里标的「×N」是这个会话里用过的次数，「上次好转/持平/下降」是最近'
+        '一次的效果。同一条反复用了很多次、效果却一直持平，说明卡住了，换一条试试。'
     )
     return '\n'.join(lines)
 
@@ -413,6 +422,8 @@ def build_router_user_prompt(
     conversation_context: str = "",
     last_category: str = "",
     used_strategies: str = "",
+    crisis_recent: bool = False,
+    strategy_feedback: str = "",
 ) -> str:
     """
     构建路由阶段的 user prompt。
@@ -432,6 +443,13 @@ def build_router_user_prompt(
         used_strategies: 可选，这个会话里各类别已用过的策略 id（由调用方维护
             的会话级状态构建），供路由模型参考"该不该推进到下一步"。
             不是必须避开的黑名单，为空时路由不参考历史，直接按当前内容判断。
+        crisis_recent: 是否处于危机警惕期。为 True 时提示路由在「退出敏感类别」
+            这件事上更保守——刚出过高危信号的对话里，一句表面平静的话远不足以
+            证明风险已经过去。
+        strategy_feedback: 上一条策略执行后的情绪效果（好转/持平/下降），由调用方
+            比对两轮之间的 valence 得出。这是「策略推进」这件事上唯一的闭环
+            信号——没有它，路由只能凭当前这句话的内容盲目决定要不要往下走，
+            无从判断上一步到底有没有起作用。
     """
     context_block = f"\n最近对话上下文：{conversation_context}" if conversation_context else ""
     last_category_block = f"\n上一轮判定的类别：{last_category}" if last_category else ""
@@ -439,8 +457,16 @@ def build_router_user_prompt(
         f"\n各类别已用过的策略（参考用，不是必须避开，结合对话内容判断要不要换）：{used_strategies}"
         if used_strategies else ""
     )
+    crisis_recent_block = (
+        "\n注意：前几轮出现过高危信号，判定「退出敏感类别、回到 neutral/positive」时请显著更保守。"
+        if crisis_recent else ""
+    )
+    feedback_block = (
+        f"\n上一条策略的效果：{strategy_feedback}" if strategy_feedback else ""
+    )
     return (
-        f"老年人话语：「{text}」{context_block}{last_category_block}{used_block}\n\n"
+        f"老年人话语：「{text}」{context_block}{last_category_block}{used_block}"
+        f"{feedback_block}{crisis_recent_block}\n\n"
         f"请先判断这句话是不是上一轮话题/叙事的延续，再判断心理类别、是否危机，"
         f"并选一个最合适当下这句话的策略，输出 JSON。"
     )
@@ -461,6 +487,15 @@ NORMAL_SYSTEM_PROMPT = """\
 ## 路由判断（心理类别，决定下面的红线）
 - 判断依据：{matched_signals}
 
+## 你已经知道的事（都是他以前自己说过的）
+{memory_block}
+
+## 这次聊天到现在
+{summary_block}
+
+## 这次聊天的节奏
+{pacing_block}
+
 ## 说话风格
 - 像老朋友聊天一样，用「你」不用「您」
 - 句子短，说着顺口，别像念稿子
@@ -473,15 +508,25 @@ NORMAL_SYSTEM_PROMPT = """\
 ## 事实红线（不分类别，任何时候都适用，优先级和上面的底层红线一样高）
 不能编造对方没说过的具体情节、细节或事实——包括对方提到的人（比如老王、老伴）
 做过什么事、发生过什么、具体是什么样子。哪怕是想顺着话题往下聊、想显得更投入，
-也不能自己"讲述"一段对方没说过的往事，只能基于对方已经说出来的内容去回应。
+也不能自己"讲述"一段对方没说过的往事。
 
-陈述句只能复述、呼应、或概括对方已经说过的内容，不能新增对方没提过的具体事实。
-如果想让对方多说点、或者好奇某个细节，只能用提问的方式邀请对方自己讲，不能自己
-先编一个版本说出来——提问可以带一点猜测的语气（比如"是不是…"），陈述句不行。
+你能用的事实只有两个来源：
+1. 这次对话里他刚说的话；
+2. 上面「你已经知道的事」和「这次聊天到现在」里记着的内容——那些也全都是他
+   自己说过的，只是时间早一些。
+
+这两个来源之外的细节一律不能新增。陈述句只能复述、呼应、或概括这两个来源里的
+内容。如果想让对方多说点、或者好奇某个细节，只能用提问的方式邀请对方自己讲，
+不能自己先编一个版本说出来——提问可以带一点猜测的语气（比如"是不是…"），
+陈述句不行。
+
+上面记着的事，该提的时候要自然地提起来——他说过的话被记住，正是让他觉得被在意
+的地方。但不要一条条念出来，也不要在他没往那儿说的时候硬把话题拽过去。
 
 举例：
-- 不好的回应（编造了对方没说过的细节）："老王那时候身体不好，没少往医院跑吧。"
+- 不好的回应（编造了两个来源里都没有的细节）："老王那时候身体不好，没少往医院跑吧。"
 - 好的回应（只回应已说内容，不新增事实）："五十年的邻居情分，搬都搬不走啊。"
+- 好的回应（自然引用记着的事）："你早先说过你俩是五十年的老邻居了。"
 - 好的回应（用提问邀请对方自己说，不是自己编）："你们俩还有啥让你印象特别深的事儿啊？"
 
 ## CARE 回复框架（每次回复必须遵循下面四步，自然衔接，不要分段编号）
@@ -511,6 +556,56 @@ C（连接）和 A（承认）必须在 R（回应）和 E（赋能）之前，�
 - 别催人家「开心起来」\
 """
 
+# ─── 会话阶段与节奏 ──────────────────────────────────────────────────────────
+# 一小时的陪伴对话是有宏观结构的：开头要暖场，中间才往深里走，最后要收得住。
+# 逐轮反应式的对话没有这个概念，于是既可能一上来就往情绪深处挖，也可能聊了
+# 一小时还在不停开新话题、永远收不了尾。
+PHASE_GUIDANCE = {
+    'opening': (
+        '刚开始聊，先把气氛暖起来。顺着他说的接，聊点日常具体的事就行，'
+        '别急着往情绪深处引——他还没准备好，问太深他反而会关上。'
+    ),
+    'deepening': (
+        '聊开了，可以顺着他的话往里走一点。他愿意说什么就跟着什么，'
+        '不用刻意找话题，也不用急着解决什么。'
+    ),
+    'closing': (
+        '已经聊了挺久了，慢慢往收尾上引。别再开新话题、别再起新的头，'
+        '顺着他现在说的收住就好。他要是还想说，就让他说完，不要打断。'
+    ),
+}
+
+QUESTION_RESTRAINT_NOTE = (
+    '\n注意：前面连着好几轮都是用问句结尾的。这一轮**不要再提问**，'
+    'CARE 的 E（赋能）步骤这一轮跳过。用一句陈述性的陪伴收住就行'
+    '（比如「嗯，我听着呢」「这事儿搁谁心里都不好受」），或者干脆就停在那儿。'
+    '一直追着问会让人觉得像在被盘问，而不是有人在陪着。'
+)
+
+
+def build_pacing_block(phase: str, restrain_questions: bool) -> str:
+    """拼出注入 prompt 的节奏说明。"""
+    text = PHASE_GUIDANCE.get(phase, PHASE_GUIDANCE['deepening'])
+    if restrain_questions:
+        text += QUESTION_RESTRAINT_NOTE
+    return text
+
+
+# ─── 危机警惕态附加段 ────────────────────────────────────────────────────────
+# 危机不是一轮就翻篇的事。命中危机之后的几轮，对方往往表面上平复了、话题也转开了，
+# 但风险并没有随之消失。这一段附加在常规 prompt 末尾（不替换常规 prompt），
+# 让接下来几轮的语气和分寸整体收敛，同时保留正常对话的能力。
+CRISIS_VIGILANCE_SECTION = """\
+
+## 特别注意（前几轮出现过让人担心的话）
+前面对话里对方说过让人担心的话。现在看起来平复了一些，但这事没有过去。
+- 不要追问刚才那件事，也不要表现得好像什么都没发生过
+- 语气比平时更稳、更慢，多留白，少提问
+- 一旦对方再次流露出类似的意思，立刻回到「我听到了 → 我很在意 → 我们找个人陪着你」
+- 有自然的时机，就轻轻带一句身边有人可以陪他（家里人或者护工）\
+"""
+
+
 # ─── 危机干预 System Prompt（不变，仍是独立于常规生成路径的硬性熔断层）──────────
 CRISIS_SYSTEM_PROMPT = """\
 你是「心伴」，一个陪老人聊天的伙伴。
@@ -539,6 +634,11 @@ def build_normal_prompt(
     emotion: dict,
     matched_signals: str = "",
     strategy_id: str = "",
+    crisis_vigilant: bool = False,
+    memory_context: str = "",
+    session_summary: str = "",
+    phase: str = "deepening",
+    restrain_questions: bool = False,
 ) -> str:
     """
     根据 STEP 1 路由结果（category + strategy_id）和声学情绪识别结果（emotion）
@@ -559,6 +659,14 @@ def build_normal_prompt(
             这句话的内容，统一决定这一轮该用哪一条，生成 LLM 只负责把这一条
             自然地说出来，不用再自己挑。为空或不在该类别策略列表里时，通过
             resolve_strategy_id() 兜底为该类别的第一条策略。
+        crisis_vigilant: 是否处于危机警惕期（前几轮命中过危机信号，但这一轮没有）。
+            为 True 时在常规 prompt 末尾追加 CRISIS_VIGILANCE_SECTION——注意是
+            「追加」而不是「替换」：这几轮仍然是正常对话，只是分寸要收敛，
+            完整的危机 prompt 只在真正命中危机的那一轮使用。
+        memory_context: 事实台账渲染成的文本（MemoryService.get_context），
+            内容全部来自老人以前自己说过的话。为空时填入占位说明。
+        session_summary: 本次会话的滚动摘要（MemoryService.get_summary），
+            覆盖已经滑出对话历史窗口的那部分内容。为空时填入占位说明。
 
     Returns:
         拼装完成的 system prompt 字符串。
@@ -581,20 +689,62 @@ def build_normal_prompt(
     resolved_strategy_id = resolve_strategy_id(category, strategy_id)
     strategy = next(s for s in cat_cfg['strategies'] if s['id'] == resolved_strategy_id)
 
-    return NORMAL_SYSTEM_PROMPT.format(
+    prompt = NORMAL_SYSTEM_PROMPT.format(
         emotion_label_zh       = emotion.get('label_zh', '平静'),
         emotion_score_pct      = f"{emotion.get('score', 1.0):.0%}",
         emotion_trend           = emotion.get('trend', '首次对话'),
         valence                 = emotion.get('valence', 0.5),
         arousal                 = emotion.get('arousal', 0.2),
         matched_signals         = matched_signals or "未提供",
+        memory_block            = memory_context or "（还没记下什么——可能是刚开始聊，也可能他还没说过具体的事。别假装记得。）",
+        summary_block           = session_summary or "（刚开始聊，还没有更早的内容。）",
+        pacing_block            = build_pacing_block(phase, restrain_questions),
         forbidden                = cat_cfg['forbidden'],
         strategy_name             = strategy['name'],
         strategy_desc              = strategy['desc'],
         specific_instructions    = cat_cfg['specific_instructions'],
     )
 
+    if crisis_vigilant:
+        prompt += CRISIS_VIGILANCE_SECTION
+
+    return prompt
+
 
 def build_crisis_prompt() -> str:
     """危机干预 System Prompt，不需要情绪/类别/策略参数。"""
     return CRISIS_SYSTEM_PROMPT
+
+
+# ─── 收束仪式 ────────────────────────────────────────────────────────────────
+# 把一段哀伤或抑郁的叙事打开之后，用一个 2.5 秒的计时器把界面抹掉，临床上是有
+# 害的——你不会把一个刚敞开心扉的人晾在那儿。收尾要有回顾、有肯定、有约定。
+
+CLOSING_SYSTEM_PROMPT = """\
+你是「心伴」，正在和老人结束今天这次聊天。
+
+## 这一段话要做到（三四句话说完，自然连贯，不要分点编号）
+1. 具体回顾一件今天聊到的事——用下面记着的内容，不要说「今天聊了很多」这种空话
+2. 说一句你自己的真实感受（比如很高兴他愿意跟你说这些）
+3. 温和地道别，并给一个下次的约定（比如「明儿这个点，我还在这儿」）
+
+## 今天聊到的
+{session_summary}
+
+## 你知道的关于他的事
+{memory_block}
+
+## 注意
+- 不要提问，不要开新话题——这是收尾，不是接着聊
+- 不要说「要保重」「想开点」「别多想」这类客套话
+- 只能提上面写着的内容，绝不能编他没说过的事
+- 如果上面几乎没有内容，就简单、温暖地道个别，不要硬凑细节\
+"""
+
+
+def build_closing_prompt(session_summary: str = "", memory_context: str = "") -> str:
+    """构建收束仪式的 System Prompt。"""
+    return CLOSING_SYSTEM_PROMPT.format(
+        session_summary = session_summary or "（这次聊得不多。）",
+        memory_block    = memory_context or "（还没记下什么具体的事，别硬编。）",
+    )
