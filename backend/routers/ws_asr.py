@@ -18,10 +18,21 @@ from fastapi import APIRouter, WebSocket, WebSocketDisconnect
 
 from services.asr_service import ASRService
 from services.emotion_service import EmotionService
-from config import ASR_SILENCE_RMS, ASR_SILENCE_FRAMES
+from config import (
+    ASR_SILENCE_RMS,
+    ASR_SILENCE_FRAMES,
+    ASR_SAMPLE_RATE,
+    EMOTION_MAX_DURATION_S,
+)
 
 logger = logging.getLogger(__name__)
 router = APIRouter()
+
+# 情绪识别音频 buffer 的样本数上限。
+# 正常情况下每次 final 结果都会清空这个 buffer；但云端异常或断连时 final 可能
+# 长时间不来，buffer 就会一直涨（16kHz float32 约 64KB/s，一小时几百 MB）。
+# 情绪识别本来也只用末尾 EMOTION_MAX_DURATION_S 那一段，留 1.5 倍余量足够。
+_MAX_SENTENCE_SAMPLES = int(ASR_SAMPLE_RATE * EMOTION_MAX_DURATION_S * 1.5)
 
 # Services will be injected from main.py
 asr_service: ASRService = None
@@ -63,11 +74,12 @@ async def _handle_cloud_session(
 
     # 用于情绪识别的音频累积 buffer
     sentence_audio: list[np.ndarray] = []
+    sentence_samples = 0
     audio_lock = asyncio.Lock()
 
     async def on_asr_result(text: str, is_final: bool):
         """由 CloudASRBackend 桥接到 asyncio 事件循环后调用。"""
-        nonlocal sentence_audio
+        nonlocal sentence_audio, sentence_samples
         beijing_time = datetime.now(
             timezone(timedelta(hours=8))
         ).strftime("%Y-%m-%d %H:%M:%S")
@@ -78,6 +90,7 @@ async def _handle_cloud_session(
                 if sentence_audio:
                     audio_for_emotion = np.concatenate(sentence_audio)
                     sentence_audio.clear()
+                    sentence_samples = 0
                 else:
                     audio_for_emotion = np.zeros(16000, dtype=np.float32)
 
@@ -118,6 +131,26 @@ async def _handle_cloud_session(
     # 延迟创建会话：收到第一帧音频后才调用 create_session() + start()
     session_created = False
 
+    async def on_asr_disconnect():
+        """云端连接非正常断开：释放旧会话，下一帧音频到达时自动重建。
+
+        一小时的对话里云端会话超时/网络抖动几乎必然发生。以前这里只打一行日志，
+        结果是系统静默失聪——老人继续说话，前端毫无反应，也不知道该重来。
+        """
+        nonlocal session_created
+        if not session_created:
+            return
+        logger.warning(f"Cloud ASR 连接中断，将在下一帧音频到达时重建: {session_id}")
+        asr_service.end_session(session_id)
+        session_created = False
+        try:
+            await websocket.send_text(json.dumps({
+                "type": "status",
+                "state": "reconnecting",
+            }))
+        except Exception:
+            pass
+
     try:
         frame_count = 0
         while True:
@@ -136,7 +169,9 @@ async def _handle_cloud_session(
                 print(f">>> Creating ASR session (calling start())... <<<", flush=True)
                 import time
                 t0 = time.monotonic()
-                asr_service.create_session(session_id, on_asr_result, loop)
+                asr_service.create_session(
+                    session_id, on_asr_result, loop, on_asr_disconnect,
+                )
                 elapsed = time.monotonic() - t0
                 session_created = True
                 print(f">>> ASR session created in {elapsed:.3f}s <<<", flush=True)
@@ -155,6 +190,11 @@ async def _handle_cloud_session(
             # 累积 float32 音频供情绪识别
             async with audio_lock:
                 sentence_audio.append(chunk)
+                sentence_samples += len(chunk)
+                # 上限保护：final 迟迟不来时（云端异常/断连）丢掉最老的帧，
+                # 情绪识别只需要末尾这一段
+                while sentence_samples > _MAX_SENTENCE_SAMPLES and len(sentence_audio) > 1:
+                    sentence_samples -= len(sentence_audio.pop(0))
 
     except WebSocketDisconnect as wd:
         print(f">>> WebSocketDisconnect: code={wd.code}, reason={wd.reason}, frames_received={frame_count} <<<", flush=True)

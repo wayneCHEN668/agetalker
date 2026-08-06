@@ -3,13 +3,13 @@ import { Platform } from 'react-native';
 
 interface UseASROptions {
   onTranscript?: (text: string, isFinal: boolean, emotion?: any) => void;
-  onStatusChange?: (status: 'idle' | 'listening' | 'processing') => void;
+  onStatusChange?: (status: 'idle' | 'listening' | 'processing' | 'reconnecting') => void;
   onError?: (message: string) => void;
   wsUrl?: string;
 }
 
 export const useASR = ({ onTranscript, onStatusChange, onError, wsUrl = 'ws://localhost:8050/ws/asr' }: UseASROptions) => {
-  const [status, setStatus] = useState<'idle' | 'listening' | 'processing'>('idle');
+  const [status, setStatus] = useState<'idle' | 'listening' | 'processing' | 'reconnecting'>('idle');
   const [isRecording, setIsRecording] = useState(false);
   
   // Ref for echo cancellation state
@@ -62,7 +62,7 @@ export const useASR = ({ onTranscript, onStatusChange, onError, wsUrl = 'ws://lo
     }
   }, [onStatusChange]);
 
-  const start = useCallback(async () => {
+  const start = useCallback(async (sessionId: string) => {
     if (Platform.OS !== 'web') {
       console.warn('Real-time audio capture is currently optimized for Web/Laptop testing.');
       return;
@@ -73,7 +73,8 @@ export const useASR = ({ onTranscript, onStatusChange, onError, wsUrl = 'ws://lo
       isIntentionalCloseRef.current = false;
 
       // 1. Setup WebSocket
-      wsRef.current = new WebSocket(wsUrl);
+      // 带上 session_id，使后端的情绪历史与 LLM 的对话历史落在同一个会话键上
+      wsRef.current = new WebSocket(`${wsUrl}?session_id=${encodeURIComponent(sessionId)}`);
       wsRef.current.onopen = () => {
         setStatus('listening');
         onStatusChange?.('listening');

@@ -1,0 +1,266 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>AgeTalker 长时对话改造 — 实现备忘录</title>
+<style>
+  :root { --bg:#FBF7F4; --fg:#2D2320; --muted:#6B5E58; --line:#E8E0DB;
+          --accent:#C17B6A; --warn:#B4542A; --ok:#4A7C59; --card:#fff; }
+  @media (prefers-color-scheme: dark) {
+    :root { --bg:#1a1614; --fg:#EFE7E2; --muted:#B0A29B; --line:#3A322E;
+            --accent:#D9967F; --warn:#E0925F; --ok:#8FBF9F; --card:#241E1B; }
+  }
+  * { box-sizing:border-box; }
+  body { margin:0; padding:2.5rem 1.25rem 5rem; background:var(--bg); color:var(--fg);
+         font:16px/1.75 -apple-system,"Segoe UI","Microsoft YaHei",sans-serif; }
+  main { max-width:52rem; margin:0 auto; }
+  h1 { font-size:1.9rem; line-height:1.3; margin:0 0 .4rem; }
+  h2 { font-size:1.3rem; margin:2.75rem 0 .75rem; padding-bottom:.4rem;
+       border-bottom:2px solid var(--line); }
+  h3 { font-size:1.05rem; margin:1.75rem 0 .5rem; color:var(--accent); }
+  .sub { color:var(--muted); margin:0 0 2rem; }
+  code { background:var(--card); border:1px solid var(--line); border-radius:4px;
+         padding:.1em .35em; font-size:.87em; }
+  table { width:100%; border-collapse:collapse; margin:1rem 0; display:block;
+          overflow-x:auto; white-space:nowrap; }
+  th,td { border:1px solid var(--line); padding:.55rem .7rem; text-align:left;
+          vertical-align:top; white-space:normal; }
+  th { background:var(--card); font-weight:600; }
+  .card { background:var(--card); border:1px solid var(--line); border-left:4px solid var(--accent);
+          border-radius:6px; padding:1rem 1.15rem; margin:1rem 0; }
+  .card.warn { border-left-color:var(--warn); }
+  .card.ok   { border-left-color:var(--ok); }
+  .card h4 { margin:0 0 .5rem; font-size:1rem; }
+  ul { padding-left:1.3rem; }
+  li { margin:.35rem 0; }
+  .tag { display:inline-block; font-size:.72rem; letter-spacing:.04em; padding:.15em .5em;
+         border-radius:999px; background:var(--accent); color:#fff; vertical-align:middle; }
+</style>
+</head>
+<body>
+<main>
+
+<h1>AgeTalker 长时对话改造 — 实现备忘录</h1>
+<p class="sub">针对「一小时对话能否前后连贯、事实一致」的问题所做的五阶段改造。
+本文记录实现中的设计决策、对设计文档的偏离、取舍，以及待确认的问题。</p>
+
+<h2>1. 出发点</h2>
+<p>原管线是<strong>逐轮反应式</strong>的：每轮独立完成「路由分类 → 选策略 → 生成回复」，
+会话级状态只有三份（对话历史、已用策略、上轮类别）。这在 3~5 分钟的短对话里工作良好，
+但目标场景是一次可能持续一小时的陪伴对话。</p>
+
+<div class="card warn">
+<h4>核心死锁</h4>
+<p><code>LLM_MAX_HISTORY_TURNS=6</code> 意味着模型只能看到约 3~5 分钟的对话。这与
+<code>templates.py</code> 的「事实红线」形成死锁：红线禁止编造老人没说过的事，
+但第 40 分钟的模型根本不知道第 5 分钟提过的人名。于是它只剩两条路——
+反问「那位是谁」（对老人来说就是「你没在听」，陪伴场景里最伤人的失败），
+或者顺着语气编（正好违反红线）。</p>
+</div>
+
+<h2>2. 各阶段改动概览</h2>
+<table>
+<tr><th>阶段</th><th>解决的问题</th><th>主要文件</th></tr>
+<tr><td>Stage 0 会话身份</td>
+    <td>ASR/情绪 与 LLM 的会话键不一致；前端 <code>resetLLM()</code> 从不通知后端，
+        上次对话的 <code>last_category</code> 会粘到下次</td>
+    <td><code>constants/Session.ts</code>（新）、三个 hook、<code>sse_llm.py</code></td></tr>
+<tr><td>Stage 1 安全与规范回归</td>
+    <td>危机状态不粘滞、前端完全不显示危机、首句 TTS 流水线缺失、ASR 断线后静默失聪</td>
+    <td><code>llm_service.py</code>、<code>asr_service.py</code>、<code>ws_asr.py</code>、<code>useLLM.ts</code>、<code>index.tsx</code></td></tr>
+<tr><td>Stage 2 双层记忆</td>
+    <td>长程失忆与事实漂移</td>
+    <td><code>memory_service.py</code>（新）、<code>templates.py</code></td></tr>
+<tr><td>Stage 3 策略闭环</td>
+    <td>策略推进开环；一小时后统计滚出窗口，回到第一条策略重做</td>
+    <td><code>llm_service.py</code>、<code>templates.py</code></td></tr>
+<tr><td>Stage 4 会话弧线</td>
+    <td>无阶段概念、每轮强制提问、结束时直接抹屏</td>
+    <td><code>llm_service.py</code>、<code>templates.py</code>、<code>index.tsx</code></td></tr>
+</table>
+
+<h2>3. 关键设计决策</h2>
+
+<h3>3.1 只从老人的原话抽取事实，不从 AI 回复抽 <span class="tag">最重要</span></h3>
+<p>AI 的回复是生成出来的，可能已经含有幻觉。如果把它当事实写进台账，等于把幻觉
+「洗」成记忆——之后每一轮都会被当作真事引用，错误持续放大且再也无法追溯来源。
+因此 <code>observe_turn()</code> 只接收 <code>user_text</code>，签名上就不给传回复的机会。</p>
+
+<h3>3.2 事实抽取放后台，而非搭车路由调用</h3>
+<p>搭车路由（扩展其输出 JSON）不增加网络往返，但会推高 <code>ROUTER_MAX_TOKENS</code>
+并延长<strong>关键路径</strong>上的路由延迟。改为在 <code>done</code> 之后用
+<code>asyncio.create_task</code> 触发，当轮回复延迟完全不受影响。
+代价：本轮说的事实从下一轮开始可用——对连贯性无实质影响。</p>
+
+<h3>3.3 台账跨会话、摘要仅会话内</h3>
+<p>台账是「关于这个人的稳定事实」，摘要是「这次聊天的叙事线」，生命周期本就不同。
+会话结束时摘要以精简形式留档进台账的 <code>session_summaries</code>，供跨天回指。</p>
+
+<h3>3.4 策略统计改为紧凑聚合</h3>
+<p>原实现存一条条原始记录并按最近 8 条截断。一小时内某类别可能被访问 30 次以上，
+早期记录会滚出窗口，路由于是「忘了」开头用过什么，第 50 分钟又从第一条策略重做。
+改为按 <code>strategy_id</code> 聚合成「次数 + 最近一次效果」后，条目数天然受限于
+该类别的策略条数（≤6），再长的会话也不会滚掉。</p>
+
+<h3>3.5 用情绪 valence 作为策略推进的闭环信号</h3>
+<p>情绪服务算出的 valence 是判断「上一步干预有没有起作用」唯一的客观信号，
+但它以前只送给生成模型当语气参考，<strong>从未送达路由</strong>。现在两轮之间比对
+valence，归为 好转 / 持平 / 下降 三档喂给路由，并在 prompt 里给出推进门控规则
+（好转→可推进；持平→再给一轮；下降→换同阶段另一条）。</p>
+
+<h2>4. 对设计文档（STEP3）的偏离</h2>
+
+<div class="card ok">
+<h4>4.1 危机轮次仍然写入对话历史（偏离 §9.3）<span class="tag">已确认采纳</span></h4>
+<p>规范要求「危机触发后当前轮次对话历史不保存，避免污染后续上下文」。
+<strong>本实现没有照做</strong>：抹掉危机轮会让紧接着的下一轮丢失刚刚发生的最重要语境，
+反而更危险。</p>
+<p>采取的折中：<em>保留在对话历史中</em>（保证连贯），但<em>排除在台账与摘要的持久化之外</em>
+（<code>_schedule_memory_work</code> 在 <code>crisis=True</code> 时跳过 <code>observe_turn</code>），
+避免危机内容长期留存并被跨会话回指。此项已有测试覆盖
+（<code>test_normal_turn_feeds_memory_but_crisis_turn_does_not</code>）。</p>
+<p><strong>已确认采纳此折中。</strong></p>
+</div>
+
+<div class="card">
+<h4>4.2 危机警惕期只按轮数衰减，不做「情绪好转即解除」（偏离规划）</h4>
+<p>原计划写的是「路由判定情绪明确好转时提前清零」。实现时改为<strong>只按轮数自然衰减</strong>：
+刚经历过高危信号的人，表面上说「我没事了」恰恰是最典型的表现，用这个信号提前解除警惕，
+等于在最不该松手的时候松手。多警惕两轮的代价远小于反过来。</p>
+</div>
+
+<div class="card">
+<h4>4.3 危机界面用暖琥珀色，而非警报红（对 §9.2 的解释）</h4>
+<p>规范写的是「温暖橙色（安全感色调）」，本实现照此执行并明确了理由：
+<strong>看到这块屏幕的是正处在危机中的老人本人</strong>，对他闪红色只会加重恐慌。
+红色（<code>Design.colors.crisis</code>）只用于「联系护理员」按钮的点缀。</p>
+</div>
+
+<div class="card">
+<h4>4.4 不硬性禁用「结束对话」（对 §9.2 的解释）</h4>
+<p>规范要求危机时「禁用结束对话按钮，防止用户独处」。直接禁用等于把人困在界面里，
+同样有害。改为：危机时结束确认弹窗换一套挽留说法，主按钮变成「叫护理员」。
+目的是不让他一个人待着，而不是不让他退出。</p>
+</div>
+
+<h2>5. 取舍</h2>
+
+<h3>5.1 逐句 TTS 的最小片段长度</h3>
+<p>恢复首句流水线后，若每凑够一句就发一次合成，CARE 的 C 步骤（「哦，是啊。」这类
+≤10 字短句）会单独变成一次请求——多一次往返，语流也被切碎。
+折中：攒到 <code>MIN_TTS_CHUNK_CHARS = 12</code> 才发，把过短的 C 与紧随的 A 并成一次合成。
+首次出声仍远早于整段生成结束。</p>
+
+<h3>5.2 结束对话的等待时间 <span class="tag">已修复</span></h3>
+<p>第一版用的是「等 6 秒再清屏」的硬编码值。复核时发现<strong>这是个真缺陷，不是打磨项</strong>：
+<code>await fetchClosing()</code> 等的是<em>文字流</em>结束，而语音由 <code>useTTS</code> 在后台排队播放。
+收尾提示词要求三四句话（约 60~80 字），中文 TTS 每秒约 4~5 字，需要 13~18 秒才念得完——
+6 秒几乎必然把告别语切在半句上，恰恰是最不该出岔子的那一句。</p>
+<p>已改为接上 <code>useTTS</code> 的 <code>onPlaybackDone</code>（该回调早就存在，只是从未接线）。</p>
+
+<h3>5.3 台账 schema 精简</h3>
+<p>规划里曾包含 <code>sensitive</code>（不该主动提及的话题）字段。实现时去掉了：
+没有可靠机制去填充它，留一个永远为空的字段只会增加复杂度。需要时再加。</p>
+
+<h2>6. 过程中发现并修复的问题</h2>
+
+<div class="card ok">
+<h4>6.1 长对话测试的假阳性（自查发现）</h4>
+<p>最初的长对话测试用「建国」作为验证人名，而我在改写事实红线时正好也用了「建国」
+举例。于是断言匹配到的是<strong>模板的固定文案</strong>而非真正的记忆——测试看着通过了，
+其实什么都没验证到。是对照组测试（关掉记忆后断言该名字消失）先炸了才暴露出来。</p>
+<p>修复：模板举例改为不含具体人名；测试改用不会出现在任何模板里的名字，
+并增加一条守卫断言 <code>test_person_name_is_not_in_any_prompt_template</code>，
+以后谁再换名字撞车会先炸在这里。</p>
+</div>
+
+<div class="card ok">
+<h4>6.2 收尾时序的竞态（接线 onPlaybackDone 时发现）</h4>
+<p>光接上 <code>onPlaybackDone</code> 还不够。语音播放常常比 LLM 生成快，
+播放队列可能在两段文字之间就先空了一次，<code>onPlaybackDone</code> 会<strong>提前触发</strong>——
+只听它照样会把告别掐断。反过来只等文字流结束，则会在语音还剩十几秒时就清屏。</p>
+<p>最终做法：收尾条件必须<strong>同时</strong>满足「文字流已结束」且「语音队列已播空」，
+函数做成幂等，两个来源都调用它，谁最后满足条件谁真正执行。
+为此给 <code>useTTS</code> 加了一个与 <code>isPlaying</code> 同步的 <code>isPlayingRef</code>
+（state 在回调闭包里会读到旧值）。另加 45 秒兜底定时器，
+防止告别一句都没播出来时界面卡住回不去。</p>
+</div>
+
+<div class="card ok">
+<h4>6.3 既有测试的 mock 缺陷</h4>
+<p><code>test_crisis_skips_routing</code> 里 <code>mock_route.return_value</code> 是二元组，
+而 <code>_route_category</code> 返回三元组。它一直「通过」只是因为危机拦截使该 mock
+从未被调用。一旦哪天危机拦截失效，这个测试会以 unpack 报错的形式挂掉，
+掩盖真正的问题。已改为三元组。</p>
+</div>
+
+<div class="card ok">
+<h4>6.4 测试污染仓库</h4>
+<p>危机相关的测试会真的走到事件分发，每跑一次就往
+<code>backend/data/crisis_events/</code> 里写一批真实 JSON 文件。
+已加 autouse fixture 拦住 <code>_write_event</code>，并清理了本次产生的 22 个文件
+（六月那批已被 git 跟踪的保留未动）。</p>
+</div>
+
+<div class="card ok">
+<h4>6.5 虚拟环境不可用</h4>
+<p><code>backend/.venv</code> 是在另一台机器上创建的（<code>home</code> 指向
+<code>D:\Program Files\python311</code>，<code>command</code> 里的路径是 <code>E:\MyDoc\APP\...</code>），
+基础解释器已不存在，任何 <code>python.exe</code> 调用都直接失败。
+本机有版本完全一致的 Python 3.11.9，且 venv 内 220 个包完好。
+已修改 <code>pyvenv.cfg</code> 的 <code>home</code> / <code>executable</code> 两行指向本机安装路径。
+这是对环境的改动，特此说明。</p>
+</div>
+
+<h2>7. 验证情况</h2>
+<ul>
+<li><strong>35 个后端单测全部通过</strong>（<code>test_llm_service.py</code> 16 +
+    <code>test_memory_service.py</code> 13 + <code>test_long_conversation.py</code> 6）。</li>
+<li><strong>核心断言</strong>：<code>test_early_fact_still_known_at_turn_100</code> —— 120 轮回放中，
+    第 5 轮提到的人物在第 100 轮仍出现在注入生成模型的 prompt 里，且已落盘。</li>
+<li><strong>对照断言</strong>：<code>test_history_window_alone_would_have_lost_it</code> —— 关掉记忆后
+    同一名字在第 100 轮消失，证明上面那条测的确实是长程记忆的功劳。</li>
+<li><strong>前端</strong>：<code>npx tsc --noEmit</code> 无错误。</li>
+<li><strong>真实 API 冒烟</strong>：抽取 prompt 对「我老伴桂芬走了三年了，她生前最爱听黄梅戏」
+    返回结构正确的 JSON；对纯闲聊句「嗯，今天天气还行」返回三个空数组，
+    说明「宁可少记，不能记错」的约束确实生效。</li>
+</ul>
+
+<div class="card warn">
+<h4>尚未做的验证</h4>
+<p>没有跑过<strong>真实的长时端到端对话</strong>（需要真人对着麦克风说 20 分钟以上）。
+ASR 断线重连的路径是按 SDK 回调语义实现的，但<strong>没有在真实断网条件下验证过</strong>——
+这是目前最需要实机确认的一处。</p>
+</div>
+
+<h2>8. 已确认的决定</h2>
+<table>
+<tr><th>问题</th><th>结论</th></tr>
+<tr><td>危机轮次的历史处理（4.1）</td>
+    <td><strong>采纳</strong>该折中：保留在对话历史中，但不写入长程记忆。</td></tr>
+<tr><td>台账的存储与保留</td>
+    <td>当前明文 JSON、永久保留，<strong>可接受</strong>。未来迁移到数据库并加密存储。</td></tr>
+<tr><td><code>elder_id</code> 的来源</td>
+    <td>当前 <code>localStorage</code> 方案<strong>可接受</strong>。应用未来部署为手机 App，
+        打开即是老人本人使用，属单用户场景，不需要「选择老人」的界面。</td></tr>
+<tr><td>收束等待时间（5.2）</td>
+    <td><strong>已修复</strong>：改为等语音真正播完（详见 5.2 与 6.2）。</td></tr>
+</table>
+
+<h2>9. 后续可做的事</h2>
+<ul>
+<li><strong>台账迁移到加密数据库</strong>（已确认的方向）。届时只需替换
+    <code>MemoryService._load</code> / <code>_save</code> 两个方法，
+    其余逻辑与存储无关，不需要改动。</li>
+<li><strong>护工侧的台账查看与订正入口</strong>：抽取难免有偏差，
+    目前没有人工纠正的途径，错了就一直错着。</li>
+<li><strong>实机验证 ASR 断线重连</strong>（见第 7 节，最需要确认的一处）。</li>
+<li><strong>老人打断（barge-in）</strong>：TTS 播放期间 ASR 输入是完全静音的，
+    一段三四句的回复意味着十几秒内老人说什么都收不到。
+    对话时长拉到一小时后，这个限制会比短对话时明显得多。</li>
+</ul>
+
+</main>
+</body>
+</html>

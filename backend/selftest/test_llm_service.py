@@ -1,5 +1,6 @@
 import sys
 import os
+import asyncio
 import pytest
 from unittest.mock import AsyncMock, MagicMock, patch
 
@@ -9,6 +10,18 @@ sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from services.llm_service import LLMService
 
 
+@pytest.fixture(autouse=True)
+def no_real_crisis_files():
+    """
+    别让测试往项目的 data/crisis_events/ 里写真实事件文件。
+
+    危机相关的测试会真的走到事件分发，之前每跑一次测试就在仓库里留下一批
+    垃圾 JSON。事件写入本身在别处验证，这里只需要它不落盘。
+    """
+    with patch.object(LLMService, '_write_event', return_value={}):
+        yield
+
+
 @pytest.fixture
 def llm_service():
     """初始化 LLMService，mock 掉 AsyncOpenAI 客户端。"""
@@ -16,6 +29,24 @@ def llm_service():
         mock_cls.return_value = MagicMock()
         service = LLMService()
     return service
+
+
+def _make_stream(texts: list[str]):
+    """构造一个假的 Qwen 流式响应（异步可迭代）。"""
+    chunks = []
+    for t in texts:
+        c = MagicMock()
+        c.choices[0].delta.content = t
+        chunks.append(c)
+
+    class _Stream:
+        def __aiter__(self):
+            async def gen():
+                for c in chunks:
+                    yield c
+            return gen()
+
+    return _Stream()
 
 
 def test_crisis_detection(llm_service):
@@ -116,7 +147,11 @@ async def test_routing_fallback_on_error(llm_service):
 async def test_crisis_skips_routing(llm_service):
     """验证危机关键词命中时跳过路由 LLM 调用。"""
     with patch.object(llm_service, '_route_category', new_callable=AsyncMock) as mock_route:
-        mock_route.return_value = ('neutral', '')
+        # _route_category 返回三元组 (category, matched_signals, strategy_id)。
+        # 这里以前写的是二元组，只因为该 mock 根本不会被调用才侥幸没炸——
+        # 一旦哪天危机拦截失效，这个测试会以 unpack 报错而不是断言失败的形式
+        # 挂掉，掩盖真正的问题。
+        mock_route.return_value = ('neutral', '', '')
         with patch.object(llm_service.client.chat.completions, 'create', new_callable=AsyncMock) as mock_create:
             mock_create.return_value = AsyncMock()
             mock_create.return_value.__aiter__.return_value = []
@@ -136,6 +171,292 @@ async def test_crisis_skips_routing(llm_service):
     assert done['category'] == 'crisis'
     assert done['tts_params']['style'] == 'gentle'
     assert done['tts_params']['speed'] == 0.82
+
+
+@pytest.mark.asyncio
+async def test_meta_event_precedes_deltas(llm_service):
+    """
+    meta 事件必须先于第一个 delta 到达。
+
+    前端靠 meta 里的 tts_params 才能「凑够一句就合成一句」；如果这些字段只在
+    done 里给，前端就只能等整段生成结束再出声，每轮多出好几秒静默。
+    """
+    with patch.object(llm_service, '_route_category', new_callable=AsyncMock) as mock_route:
+        mock_route.return_value = ('grief', '哀伤信号', 'externalize')
+        with patch.object(llm_service.client.chat.completions, 'create',
+                          new_callable=AsyncMock) as mock_create:
+            mock_create.return_value = _make_stream(['我在', '听着呢。'])
+            chunks = [c async for c in llm_service.stream_reply(
+                "我老伴走了三年了", {"label": "sad"}, "s_meta",
+            )]
+
+    types = [c['type'] for c in chunks]
+    assert types[0] == 'meta', f"第一个事件应该是 meta，实际是 {types[0]}"
+    assert 'delta' in types
+    assert types.index('meta') < types.index('delta')
+
+    meta = chunks[0]
+    assert meta['category'] == 'grief'
+    assert meta['tts_params']['speed'] == 0.82        # 哀伤 → 最缓
+    assert meta['strategy_name'] == '外化对话'         # 策略中文名已解析好
+    # done 仍然携带同样的字段（向后兼容）
+    done = next(c for c in chunks if c['type'] == 'done')
+    assert done['tts_params'] == meta['tts_params']
+    assert done['category'] == meta['category']
+
+
+@pytest.mark.asyncio
+async def test_crisis_vigilance_persists_then_decays(llm_service):
+    """
+    危机之后的若干轮，即使不再命中危机关键词也维持警惕态（设计文档 §9.3）。
+
+    这是本次修复的安全缺口之一：以前危机是逐轮重新判定的，下一句话没命中
+    关键词就直接回到常规对话，等于危机一轮就翻篇。
+    """
+    from config import CRISIS_VIGILANCE_TURNS
+    sid = 's_vigil'
+
+    with patch.object(llm_service, '_route_category', new_callable=AsyncMock) as mock_route:
+        mock_route.return_value = ('neutral', '', 'natural_followup')
+        with patch.object(llm_service.client.chat.completions, 'create',
+                          new_callable=AsyncMock) as mock_create:
+            # 第 1 轮：命中危机关键词
+            mock_create.return_value = _make_stream(['我听到了。'])
+            _ = [c async for c in llm_service.stream_reply(
+                "我不想活了", {"label": "sad"}, sid)]
+            assert llm_service.crisis_vigilance[sid] == CRISIS_VIGILANCE_TURNS
+
+            # 之后 N 轮都是普通闲聊，警惕期应逐轮衰减但仍然生效
+            for expected_after in range(CRISIS_VIGILANCE_TURNS - 1, -1, -1):
+                assert llm_service._is_crisis_vigilant(sid) is True
+                mock_create.return_value = _make_stream(['嗯。'])
+                _ = [c async for c in llm_service.stream_reply(
+                    "今天天气不错", {"label": "neutral"}, sid)]
+                assert llm_service.crisis_vigilance[sid] == expected_after
+
+                # 警惕段确实进了 system prompt，而不只是记了个状态
+                sys_prompt = mock_create.call_args.kwargs['messages'][0]['content']
+                assert '前几轮出现过让人担心的话' in sys_prompt
+
+    # 衰减到 0 之后恢复常规对话
+    assert llm_service._is_crisis_vigilant(sid) is False
+
+
+class _StubMemory:
+    """替身记忆服务，用来验证 LLMService 和记忆之间的接线。"""
+
+    def __init__(self):
+        self.observed: list = []
+        self.folded: list = []
+
+    def get_context(self, elder_id):
+        return '【他提到过的人】\n- 建国（老伴）[已故]：走了三年'
+
+    def get_summary(self, session_id):
+        return '老人聊起了老伴建国，说他走了三年。'
+
+    async def observe_turn(self, elder_id, user_text):
+        self.observed.append((elder_id, user_text))
+        return {}
+
+    async def fold_into_summary(self, session_id, messages):
+        self.folded.append(messages)
+        return ''
+
+    def reset_session(self, session_id):
+        pass
+
+    def close_session(self, elder_id, session_id):
+        pass
+
+
+@pytest.fixture
+def llm_with_memory():
+    with patch('services.llm_service.AsyncOpenAI') as mock_cls:
+        mock_cls.return_value = MagicMock()
+        service = LLMService(memory_service=_StubMemory())
+    return service
+
+
+@pytest.mark.asyncio
+async def test_memory_is_injected_into_system_prompt(llm_with_memory):
+    """
+    台账和摘要必须真的进到 system prompt——记下来却不注入等于没记。
+
+    同时验证事实红线已经改写成「台账里的内容也可以用」：只加台账不改红线的话，
+    模型会以为台账内容属于"对方没说过的事"，照样不敢引用。
+    """
+    svc = llm_with_memory
+    with patch.object(svc, '_route_category', new_callable=AsyncMock) as mock_route:
+        mock_route.return_value = ('grief', '哀伤信号', 'externalize')
+        with patch.object(svc.client.chat.completions, 'create',
+                          new_callable=AsyncMock) as mock_create:
+            mock_create.return_value = _make_stream(['嗯。'])
+            _ = [c async for c in svc.stream_reply(
+                "我今天又想起他了", {"label": "sad"}, "s_mem", "elder_x")]
+
+    sys_prompt = mock_create.call_args.kwargs['messages'][0]['content']
+    assert '建国' in sys_prompt, "台账内容没进 system prompt"
+    assert '老伴' in sys_prompt
+    assert '老人聊起了老伴建国' in sys_prompt, "滚动摘要没进 system prompt"
+    # 红线明确把台账列为可用来源
+    assert '你能用的事实只有两个来源' in sys_prompt
+
+
+@pytest.mark.asyncio
+async def test_normal_turn_feeds_memory_but_crisis_turn_does_not(llm_with_memory):
+    """
+    普通轮次写入长程记忆；危机轮次不写。
+
+    危机内容仍然留在对话历史里（下一轮需要这个语境），但不该沉淀成跨会话的
+    永久记录，以后被回指出来。
+    """
+    svc = llm_with_memory
+    with patch.object(svc, '_route_category', new_callable=AsyncMock) as mock_route:
+        mock_route.return_value = ('neutral', '', 'natural_followup')
+        with patch.object(svc.client.chat.completions, 'create',
+                          new_callable=AsyncMock) as mock_create:
+            mock_create.return_value = _make_stream(['嗯。'])
+            _ = [c async for c in svc.stream_reply(
+                "今天吃了饺子", {"label": "neutral"}, "s_a", "elder_y")]
+            await asyncio.sleep(0)   # 让后台任务跑起来
+
+            mock_create.return_value = _make_stream(['我听到了。'])
+            _ = [c async for c in svc.stream_reply(
+                "我不想活了", {"label": "sad"}, "s_a", "elder_y")]
+            await asyncio.sleep(0)
+
+    observed_texts = [t for _, t in svc.memory.observed]
+    assert "今天吃了饺子" in observed_texts
+    assert "我不想活了" not in observed_texts, "危机内容不应写入长程记忆"
+
+
+@pytest.mark.asyncio
+async def test_dropped_history_is_folded_into_summary(llm_with_memory):
+    """
+    滑出历史窗口的消息必须进滚动摘要，否则一小时对话里前 55 分钟就真的没了。
+    """
+    from config import LLM_MAX_HISTORY_TURNS, MEMORY_SUMMARY_EVERY_N_MSGS
+    svc = llm_with_memory
+    sid = 's_fold'
+    # 预填满历史，使后续轮次必然产生裁剪
+    svc.sessions[sid] = []
+    for i in range(LLM_MAX_HISTORY_TURNS * 2 + MEMORY_SUMMARY_EVERY_N_MSGS):
+        svc.sessions[sid].append({'role': 'user', 'content': f'老人第{i}句'})
+        svc.sessions[sid].append({'role': 'assistant', 'content': f'回复{i}'})
+
+    with patch.object(svc, '_route_category', new_callable=AsyncMock) as mock_route:
+        mock_route.return_value = ('neutral', '', 'natural_followup')
+        with patch.object(svc.client.chat.completions, 'create',
+                          new_callable=AsyncMock) as mock_create:
+            mock_create.return_value = _make_stream(['嗯。'])
+            _ = [c async for c in svc.stream_reply(
+                "新的一句", {"label": "neutral"}, sid, "elder_z")]
+            await asyncio.sleep(0)
+
+    assert svc.memory.folded, "被裁掉的历史没有交给摘要压缩"
+    folded_contents = [m['content'] for batch in svc.memory.folded for m in batch]
+    assert any('老人第0句' in c for c in folded_contents)
+
+
+@pytest.mark.asyncio
+async def test_strategy_effect_feedback_reaches_router(llm_service):
+    """
+    上一条策略的效果（由两轮之间的 valence 变化得出）必须传给路由。
+
+    这是策略推进的闭环信号：没有它，路由每轮都在不知道上一步有没有起作用的
+    情况下决定要不要往下走，分阶段干预就退化成了瞎猜。
+    """
+    sid = 's_effect'
+    with patch.object(llm_service, '_route_category', new_callable=AsyncMock) as mock_route:
+        mock_route.return_value = ('anger', '愤怒信号', 'pause_breathe')
+        with patch.object(llm_service.client.chat.completions, 'create',
+                          new_callable=AsyncMock) as mock_create:
+            # 第 1 轮：valence 很低（生气）
+            mock_create.return_value = _make_stream(['嗯。'])
+            _ = [c async for c in llm_service.stream_reply(
+                "他们太气人了", {"label": "angry", "valence": 0.10}, sid)]
+            # 第 1 轮没有上一条策略可结算
+            assert mock_route.call_args.kwargs.get('strategy_feedback', '') == ''
+
+            # 第 2 轮：valence 明显回升 → 应判定为「好转」
+            mock_create.return_value = _make_stream(['嗯。'])
+            _ = [c async for c in llm_service.stream_reply(
+                "唉，算了", {"label": "neutral", "valence": 0.50}, sid)]
+
+    feedback = mock_route.call_args.kwargs['strategy_feedback']
+    assert 'pause_breathe' in feedback
+    assert '好转' in feedback
+    # 效果也记进了策略统计
+    assert llm_service.strategy_history[sid]['anger']['pause_breathe']['last_effect'] == '好转'
+
+
+@pytest.mark.asyncio
+async def test_strategy_stats_survive_a_long_conversation(llm_service):
+    """
+    一小时对话里同一类别会被访问几十次，早期用过的策略不能被挤出统计。
+
+    以前存的是原始记录列表并按最近 8 条截断，30 轮之后开头用过什么就"忘了"，
+    路由于是又从第一条策略重新做一遍。现在按 strategy_id 聚合，条目数天然
+    受限于该类别的策略条数。
+    """
+    sid = 's_long'
+    emotion = {"label": "sad", "valence": 0.2}
+    for i in range(40):
+        llm_service._record_strategy_use(
+            sid, 'depression',
+            'identify_negative_thoughts' if i == 0 else 'cognitive_reframe',
+            emotion,
+        )
+
+    stats = llm_service.strategy_history[sid]['depression']
+    # 第 1 轮用的那条 40 轮之后依然在册
+    assert 'identify_negative_thoughts' in stats
+    assert stats['identify_negative_thoughts']['count'] == 1
+    assert stats['cognitive_reframe']['count'] == 39
+
+    rendered = llm_service._format_used_strategies(sid)
+    assert 'identify_negative_thoughts×1' in rendered
+    assert 'cognitive_reframe×39' in rendered
+
+
+@pytest.mark.asyncio
+async def test_closing_reviews_the_session(llm_with_memory):
+    """
+    收束告别要基于本次会话的摘要做具体回顾，而不是一句空泛的客套。
+
+    以前"结束对话"就是 2.5 秒后清屏——把一段哀伤叙事打开之后这样收场，
+    等于把刚敞开心扉的人晾在那儿。
+    """
+    svc = llm_with_memory
+    with patch.object(svc.client.chat.completions, 'create',
+                      new_callable=AsyncMock) as mock_create:
+        mock_create.return_value = _make_stream(['今天听你说了不少。'])
+        chunks = [c async for c in svc.stream_closing('s_close', 'elder_c')]
+
+    sys_prompt = mock_create.call_args.kwargs['messages'][0]['content']
+    assert '老人聊起了老伴建国' in sys_prompt, "收尾没有用上本次会话的摘要"
+    assert '不要提问' in sys_prompt
+    assert '不要开新话题' in sys_prompt
+
+    types = [c['type'] for c in chunks]
+    assert types[0] == 'meta'
+    assert types[-1] == 'done'
+    assert chunks[-1]['category'] == 'closing'
+
+
+@pytest.mark.asyncio
+async def test_closing_falls_back_when_generation_fails(llm_with_memory):
+    """生成失败也必须有一句告别——不能因为 API 挂了就无声消失。"""
+    svc = llm_with_memory
+    with patch.object(svc.client.chat.completions, 'create',
+                      new_callable=AsyncMock) as mock_create:
+        mock_create.side_effect = RuntimeError('API 挂了')
+        chunks = [c async for c in svc.stream_closing('s_close2', 'elder_c')]
+
+    done = next(c for c in chunks if c['type'] == 'done')
+    assert done['full_text'].strip(), "生成失败时没有任何告别内容"
+    assert any(c['type'] == 'delta' for c in chunks)
 
 
 def test_category_tts_params(llm_service):

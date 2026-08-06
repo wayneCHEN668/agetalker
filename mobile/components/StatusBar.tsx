@@ -3,7 +3,7 @@ import { View, Text, StyleSheet, Animated } from 'react-native';
 import { Design } from '../constants/Design';
 
 interface StatusBarProps {
-  status: 'listening' | 'processing' | 'idle';
+  status: 'listening' | 'processing' | 'idle' | 'reconnecting';
 }
 
 const ThinkingDots: React.FC = () => {
@@ -77,9 +77,12 @@ export const StatusBar: React.FC<StatusBarProps> = ({ status }) => {
 
   const getStatusText = () => {
     switch (status) {
-      case 'listening':   return '正在聆听';
-      case 'processing':  return '思考中';
-      default:            return '准备聆听';
+      case 'listening':    return '正在聆听';
+      case 'processing':   return '思考中';
+      // 不说「连接断开」这类技术词——对老人只说「稍等一下」，
+      // 重连是后台自动完成的，他不需要做任何事
+      case 'reconnecting': return '稍等一下';
+      default:             return '准备聆听';
     }
   };
 

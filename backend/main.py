@@ -5,7 +5,9 @@ from fastapi import FastAPI
 from services.asr_service import ASRService
 from services.emotion_service import EmotionService
 from services.llm_service import LLMService
+from services.memory_service import MemoryService
 from services.tts_service import TTSService
+from config import MEMORY_ENABLED
 import routers.ws_asr as ws_asr_router
 import routers.sse_llm as sse_llm_router
 import routers.stream_tts as stream_tts_router
@@ -28,7 +30,11 @@ async def lifespan(app: FastAPI):
     # 1. Initialize Services
     asr_svc = ASRService()
     emotion_svc = EmotionService()
-    llm_svc = LLMService()
+    # 长程记忆：关掉时对话照常工作，只是退回到「只记得最近 6 轮」
+    memory_svc = MemoryService() if MEMORY_ENABLED else None
+    if memory_svc is None:
+        logger.warning("长程记忆已禁用 (MEMORY_ENABLED=0)，模型只能看到最近 6 轮对话")
+    llm_svc = LLMService(memory_service=memory_svc)
     tts_svc = TTSService()
     
     # 2. Inject Services into Routers
