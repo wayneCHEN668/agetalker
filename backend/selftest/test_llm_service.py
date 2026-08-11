@@ -459,6 +459,74 @@ async def test_closing_falls_back_when_generation_fails(llm_with_memory):
     assert any(c['type'] == 'delta' for c in chunks)
 
 
+def test_truncate_last_reply_keeps_only_what_was_heard(llm_service):
+    """
+    被打断时，历史里那条回复要截断成实际播出去的部分。
+
+    不截断的话模型以为整段说完了，下一轮可能出现「我刚才跟你说的那个……」，
+    而老人根本没听到后半截。
+    """
+    sid = 's_trunc'
+    llm_service.sessions[sid] = [
+        {'role': 'user', 'content': '我今天有点累'},
+        {'role': 'assistant', 'content': '嗯，听得出来。今天是不是没歇好？要不咱们说说？'},
+    ]
+
+    changed = llm_service.truncate_last_reply(sid, '嗯，听得出来。')
+    assert changed is True
+    assert llm_service.sessions[sid][-1]['content'] == '嗯，听得出来。'
+    assert len(llm_service.sessions[sid]) == 2   # 用户那条不动
+
+
+def test_truncate_removes_reply_when_nothing_was_heard(llm_service):
+    """一个字都没播出去就被打断 → 整条回复从历史里移除。"""
+    sid = 's_trunc2'
+    llm_service.sessions[sid] = [
+        {'role': 'user', 'content': '我今天有点累'},
+        {'role': 'assistant', 'content': '嗯，听得出来。'},
+    ]
+    assert llm_service.truncate_last_reply(sid, '') is True
+    assert len(llm_service.sessions[sid]) == 1
+    assert llm_service.sessions[sid][-1]['role'] == 'user'
+
+
+def test_truncate_is_noop_when_fully_spoken_or_nothing_to_cut(llm_service):
+    """全部播完、或历史里最后一条不是回复时，不该乱改。"""
+    sid = 's_trunc3'
+    full = '嗯，听得出来。'
+    llm_service.sessions[sid] = [
+        {'role': 'user', 'content': '我今天有点累'},
+        {'role': 'assistant', 'content': full},
+    ]
+    assert llm_service.truncate_last_reply(sid, full) is False
+    assert llm_service.sessions[sid][-1]['content'] == full
+
+    # 最后一条是用户消息（回复还没生成）
+    llm_service.sessions[sid].pop()
+    assert llm_service.truncate_last_reply(sid, '随便什么') is False
+    # 会话根本不存在
+    assert llm_service.truncate_last_reply('不存在的会话', '啥') is False
+
+
+def test_truncate_resets_question_streak_when_question_cut_off(llm_service):
+    """
+    以问句结尾的回复被截断掉问句部分后，连续提问计数要跟着清零。
+
+    否则明明那个问题老人没听到，系统却记着"已经连问三轮了"，
+    接下来该问的时候反而不问了。
+    """
+    sid = 's_trunc4'
+    llm_service.sessions[sid] = [
+        {'role': 'user', 'content': '还行'},
+        {'role': 'assistant', 'content': '嗯。今天过得咋样？'},
+    ]
+    llm_service._note_reply_shape(sid, '嗯。今天过得咋样？')
+    assert llm_service._get_session_meta(sid)['consecutive_questions'] == 1
+
+    llm_service.truncate_last_reply(sid, '嗯。')
+    assert llm_service._get_session_meta(sid)['consecutive_questions'] == 0
+
+
 def test_category_tts_params(llm_service):
     """验证心理类别 → TTS 参数映射（语义驱动）。"""
     # 哀伤/抑郁 → 最缓

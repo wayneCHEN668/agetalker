@@ -42,6 +42,9 @@ export const useLLM = (options: UseLLMOptions = {}) => {
 
   // elder_id 跨会话稳定，读一次即可
   const elderIdRef = useRef<string>(getElderId());
+  // 当前这条流的中止句柄。老人在回复生成到一半又开口时，这条回复要就地作废，
+  // 否则会出现两条回复（第二条常常还跟第一条重复）。
+  const abortRef = useRef<AbortController | null>(null);
 
   const [response, setResponse] = useState('');
   const [isStreaming, setIsStreaming] = useState(false);
@@ -73,8 +76,11 @@ export const useLLM = (options: UseLLMOptions = {}) => {
       if (trimmed) onSentence?.(trimmed, ttsParams, category);
     };
 
+    const controller = new AbortController();
+    abortRef.current = controller;
+
     try {
-      const res = await fetch(url, init);
+      const res = await fetch(url, { ...init, signal: controller.signal });
 
       if (!res.ok) {
         throw new Error(`HTTP error! status: ${res.status}`);
@@ -155,14 +161,26 @@ export const useLLM = (options: UseLLMOptions = {}) => {
       // 流完成回调（传递策略名称给前端气泡标签）
       onDone?.(capturedStrategyName);
     } catch (err) {
+      // 主动作废（老人又开口了）不是错误，别弹"我走神了"那句
+      if (controller.signal.aborted) {
+        console.log('[useLLM] 回复已作废（老人继续说话）');
+        return;
+      }
       console.error('LLM Fetch Error:', err);
       setResponse(fallbackText);
       onDelta?.(fallbackText);
       onDone?.();
     } finally {
       setIsStreaming(false);
+      if (abortRef.current === controller) abortRef.current = null;
     }
   }, [onSentence, onDelta, onDone]);
+
+  /** 作废当前这条回复（老人在 AI 说话时又开口了）。 */
+  const abort = useCallback(() => {
+    abortRef.current?.abort();
+    abortRef.current = null;
+  }, []);
 
   /** 普通一轮对话。 */
   const fetchReply = useCallback(
@@ -223,5 +241,8 @@ export const useLLM = (options: UseLLMOptions = {}) => {
     }
   }, [baseUrl]);
 
-  return { response, fetchReply, fetchClosing, isStreaming, reset, strategyName, isCrisis };
+  return {
+    response, fetchReply, fetchClosing, abort,
+    isStreaming, reset, strategyName, isCrisis,
+  };
 };

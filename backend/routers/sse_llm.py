@@ -103,6 +103,24 @@ async def reset_session(session_id: str = 'default', elder_id: str = ''):
     return {'status': 'ok', 'session_id': session_id}
 
 
+class TruncateRequest(BaseModel):
+    session_id:  str = Field(default='default', description="会话 ID")
+    spoken_text: str = Field(default='',        description="实际播放出去的回复文本")
+
+
+@router.post('/llm/truncate_last')
+async def truncate_last_reply(req: TruncateRequest):
+    """
+    老人插话打断时调用：把历史里最后一条回复截断成实际听到的部分。
+
+    否则模型以为整段都说完了，下一轮可能引用老人根本没听到的内容。
+    """
+    if llm_service is None:
+        return {'status': 'error', 'message': 'LLMService not initialized'}
+    changed = llm_service.truncate_last_reply(req.session_id, req.spoken_text)
+    return {'status': 'ok', 'truncated': changed}
+
+
 @router.post('/llm/crisis/escalate')
 async def escalate_to_caregiver(session_id: str = 'default'):
     """

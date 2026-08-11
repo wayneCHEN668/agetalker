@@ -160,6 +160,44 @@ async def test_extraction_failure_does_not_break(tmp_path):
     assert svc.get_context('elder_d') == ''
 
 
+def test_summary_input_excludes_assistant_turns():
+    """
+    摘要只能拿老人自己说的话，AI 的回复必须剔除。
+
+    否则 AI 某一轮编的话会被摘要吸收成「聊过的事」，之后每轮作为事实注入
+    prompt，幻觉就这么洗白成了记忆，错误一直滚下去。
+    """
+    text = MemoryService._summarize_input([
+        {'role': 'user', 'content': '我今天去了趟菜市场'},
+        {'role': 'assistant', 'content': '你老伴以前也常陪你去吧？'},   # AI 编的
+        {'role': 'user', 'content': '买了点萝卜'},
+    ])
+    assert '菜市场' in text
+    assert '萝卜' in text
+    assert '老伴' not in text, "AI 的回复混进摘要输入了"
+    assert '心伴' not in text
+
+
+def test_fact_red_line_examples_are_disclaimed():
+    """
+    事实红线里的举例必须带「这是另一段对话、不许搬用」的警告。
+
+    真实对话里出过事故：示例里的「老王」「五十年邻居」被模型当成可用素材说了
+    出来，而老人从没提过邻居。裸示例（尤其标着「好的回应」的）会被当成 few-shot
+    模板照抄，这条断言防止它被改回去。
+    """
+    from prompts.templates import build_normal_prompt
+    prompt = build_normal_prompt(
+        'grief', {'label_zh': '悲伤', 'score': 0.8, 'trend': '首次对话',
+                  'valence': 0.1, 'arousal': 0.2}, '哀伤信号', 'externalize',
+    )
+    assert '另外一段对话' in prompt, "举例没有标明属于别的对话"
+    assert '毫无关系' in prompt
+    assert '一个字都不许搬进你的回复' in prompt
+    # 不能再出现「你早先说过……」这种凭空断言老人说过什么的句式模板
+    assert '你早先说过你俩' not in prompt
+
+
 @pytest.mark.asyncio
 async def test_close_session_archives_summary(tmp_path):
     """会话结束时摘要留档，下次对话能回指。"""

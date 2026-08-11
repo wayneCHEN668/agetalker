@@ -23,6 +23,7 @@ from config import (
     ASR_SILENCE_FRAMES,
     ASR_SAMPLE_RATE,
     EMOTION_MAX_DURATION_S,
+    ASR_MERGE_WINDOW_MS,
 )
 
 logger = logging.getLogger(__name__)
@@ -33,6 +34,68 @@ router = APIRouter()
 # 长时间不来，buffer 就会一直涨（16kHz float32 约 64KB/s，一小时几百 MB）。
 # 情绪识别本来也只用末尾 EMOTION_MAX_DURATION_S 那一段，留 1.5 倍余量足够。
 _MAX_SENTENCE_SAMPLES = int(ASR_SAMPLE_RATE * EMOTION_MAX_DURATION_S * 1.5)
+
+
+class SentenceAggregator:
+    """
+    把云端 VAD 切出来的多个 final 合并成「完整的一轮发言」。
+
+    老人一句话中间停顿两三秒是常事，云端会切成两三段，系统于是拿着半句话
+    （「我昨天去了」）就去回复了。光调大 VAD 静音阈值解决不了这个问题——
+    调大之后每一轮回复都会跟着变慢。
+
+    正确的分工是：云端 VAD 只管**转写分段**，「这一轮说完了没有」由这里判断。
+    收到 final 之后先不提交，等一个短窗口；期间只要老人又开口（来了新的中间
+    结果），就说明刚才只是句中停顿，取消提交、继续攒。
+
+    窗口长度是固定的，不按尾部标点自适应——第一版那么做过，是错的：ASR 的标点
+    靠**韵律停顿**插入，老人边想边说时的停顿会被插成句号。实测转写
+    「上面写的名字。叫王翠芬。」，句号就出现在一句连贯话的中间。于是"以句号
+    结尾就少等"这条规则，恰好在他话说到一半停顿时判定说完了，反而更容易切断。
+    标点在这里不是可靠信号，唯一可靠的信号是「他又开口了」。
+    """
+
+    def __init__(self, commit):
+        self._commit = commit          # async def commit(merged_text: str)
+        self._parts: list[str] = []
+        self._task: asyncio.Task | None = None
+
+    @property
+    def buffered(self) -> str:
+        return ''.join(self._parts)
+
+    def add_final(self, text: str) -> str:
+        """收到一个 final：攒起来并重起提交计时器。返回当前已攒的完整文本。"""
+        self._parts.append(text.strip())
+        self._cancel_timer()
+        self._task = asyncio.create_task(self._commit_after(ASR_MERGE_WINDOW_MS))
+        return self.buffered
+
+    def note_partial(self) -> bool:
+        """老人又开口了：取消待提交。返回是否真的取消掉了一个。"""
+        return self._cancel_timer()
+
+    def cancel(self):
+        """连接结束等场景：丢弃一切，别留下悬空任务。"""
+        self._cancel_timer()
+        self._parts = []
+
+    def _cancel_timer(self) -> bool:
+        cancelled = False
+        if self._task and not self._task.done():
+            self._task.cancel()
+            cancelled = True
+        self._task = None
+        return cancelled
+
+    async def _commit_after(self, delay_ms: int):
+        # 被 cancel 时 CancelledError 直接上抛，任务标记为已取消即可
+        await asyncio.sleep(delay_ms / 1000.0)
+        merged = self.buffered
+        self._parts = []
+        self._task = None
+        if merged:
+            await self._commit(merged)
 
 # Services will be injected from main.py
 asr_service: ASRService = None
@@ -77,53 +140,69 @@ async def _handle_cloud_session(
     sentence_samples = 0
     audio_lock = asyncio.Lock()
 
+    # ── 整句合并 ─────────────────────────────────────────────────────────────
+    # 云端 VAD 只负责转写分段；「这一轮说完了没有」由这里判断。老人一句话中间
+    # 停顿两三秒是常事，光靠调大 VAD 阈值会把每一轮的回复都拖慢。
+    def _now_str() -> str:
+        return datetime.now(timezone(timedelta(hours=8))).strftime("%Y-%m-%d %H:%M:%S")
+
+    async def _send(payload: dict):
+        try:
+            await websocket.send_text(json.dumps(payload))
+        except Exception:
+            pass  # WebSocket 可能已关闭
+
+    async def _commit_merged(merged: str):
+        """一轮发言攒完了：做情绪识别，然后交给前端。"""
+        nonlocal sentence_audio, sentence_samples
+
+        async with audio_lock:
+            if sentence_audio:
+                audio_for_emotion = np.concatenate(sentence_audio)
+                sentence_audio.clear()
+                sentence_samples = 0
+            else:
+                audio_for_emotion = np.zeros(16000, dtype=np.float32)
+
+        emotion_res = await asyncio.to_thread(
+            emotion_service.analyze, audio_for_emotion, session_id,
+        )
+        logger.info(
+            f"Session {session_id} | Transcript: {merged} "
+            f"| Emotion: {emotion_res.label_zh}"
+        )
+        await _send({
+            "type": "transcript",
+            "text": merged,
+            "emotion": emotion_service.to_dict(emotion_res),
+            "is_final": True,
+            "timestamp": _now_str(),
+        })
+
+    aggregator = SentenceAggregator(_commit_merged)
+
     async def on_asr_result(text: str, is_final: bool):
         """由 CloudASRBackend 桥接到 asyncio 事件循环后调用。"""
-        nonlocal sentence_audio, sentence_samples
-        beijing_time = datetime.now(
-            timezone(timedelta(hours=8))
-        ).strftime("%Y-%m-%d %H:%M:%S")
-
         if is_final and text.strip():
-            # 句末：取出累积音频做情绪识别
-            async with audio_lock:
-                if sentence_audio:
-                    audio_for_emotion = np.concatenate(sentence_audio)
-                    sentence_audio.clear()
-                    sentence_samples = 0
-                else:
-                    audio_for_emotion = np.zeros(16000, dtype=np.float32)
-
-            emotion_res = await asyncio.to_thread(
-                emotion_service.analyze, audio_for_emotion, session_id,
-            )
-            logger.info(
-                f"Session {session_id} | Transcript: {text} "
-                f"| Emotion: {emotion_res.label_zh}"
-            )
-
-            try:
-                await websocket.send_text(json.dumps({
-                    "type": "transcript",
-                    "text": text,
-                    "emotion": emotion_service.to_dict(emotion_res),
-                    "is_final": True,
-                    "timestamp": beijing_time,
-                }))
-            except Exception:
-                pass  # WebSocket 可能已关闭
+            buffered = aggregator.add_final(text)
+            # 已攒的内容先按中间结果显示，老人能看到整句在长
+            await _send({
+                "type": "transcript",
+                "text": buffered,
+                "is_final": False,
+                "timestamp": _now_str(),
+            })
 
         elif not is_final:
-            # 中间结果：推送给前端实时显示
-            try:
-                await websocket.send_text(json.dumps({
-                    "type": "transcript",
-                    "text": text,
-                    "is_final": False,
-                    "timestamp": beijing_time,
-                }))
-            except Exception:
-                pass
+            # 老人又开口了：刚才那个 final 只是句中停顿，取消提交继续攒
+            if aggregator.note_partial():
+                logger.debug(f"Session {session_id} | 检测到续说，合并前一段")
+            await _send({
+                "type": "transcript",
+                "text": aggregator.buffered + text,
+                "is_final": False,
+                "timestamp": _now_str(),
+            })
 
     await websocket.send_text(json.dumps({"type": "status", "state": "listening"}))
     logger.info(f"Cloud ASR: Sent 'listening' status, waiting for audio frames...")
@@ -213,6 +292,9 @@ async def _handle_cloud_session(
             }))
         except Exception:
             pass
+    finally:
+        # 连接结束了，还挂着的合并计时器没有意义，取消掉免得留下悬空任务
+        aggregator.cancel()
 
 
 async def _handle_local_session(websocket: WebSocket, session_id: str):

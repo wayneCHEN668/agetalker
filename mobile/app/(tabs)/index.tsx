@@ -39,12 +39,18 @@ export default function HomeScreen() {
   const onPlaybackDoneRef = useRef<() => void>(() => {});
 
   // 1. TTS
-  const { speak, stop: stopTTS, isPlayingRef: ttsPlayingRef } = useTTS({
+  const {
+    speak, stop: stopTTS, stopForBargeIn, getSpokenText, resetSpokenText,
+    isPlayingRef: ttsPlayingRef,
+  } = useTTS({
     onPlaybackDone: () => onPlaybackDoneRef.current(),
   });
 
   // 2. LLM
-  const { fetchReply, fetchClosing, reset: resetLLM, isCrisis } = useLLM({
+  // 当前是否有一条回复正在生成（state 在回调里会读到旧值，用 ref）
+  const replyInFlightRef = useRef(false);
+
+  const { fetchReply, fetchClosing, abort: abortLLM, reset: resetLLM, isCrisis } = useLLM({
     onDelta: (deltaText) => {
       setIsLLMStreaming(true);
       setMessages((prev) => {
@@ -91,13 +97,63 @@ export default function HomeScreen() {
       }
       streamingIndexRef.current = null;
       setIsLLMStreaming(false);
+      replyInFlightRef.current = false;
     },
   });
 
+  /**
+   * 作废正在进行中的那条回复。
+   *
+   * 触发场景：老人一句话被 ASR 切成了两段，第二段到达时第一条回复已经在生成
+   * 或播放了。不作废的话两条回复都会发出来，而且内容常常大半重复——实测就是
+   * 这个现象。这里把它就地掐掉，让下一次生成拿着完整的话重新说。
+   */
+  const discardOngoingReply = useCallback(async () => {
+    if (!replyInFlightRef.current && !ttsPlayingRef.current) return;
+
+    const spoken = getSpokenText();
+    abortLLM();
+    stopForBargeIn();
+    replyInFlightRef.current = false;
+
+    // 屏幕上那半条回复：说出口了就截断保留，一个字没说就整条撤掉
+    setMessages((prev) => {
+      const idx = streamingIndexRef.current;
+      if (idx === null || idx >= prev.length || prev[idx].role !== 'assistant') return prev;
+      const updated = [...prev];
+      if (spoken.trim()) {
+        updated[idx] = { ...updated[idx], text: spoken, interrupted: true };
+      } else {
+        updated.splice(idx, 1);
+      }
+      return updated;
+    });
+    streamingIndexRef.current = null;
+    setIsLLMStreaming(false);
+
+    // 必须等截断完成再发下一轮请求，否则新的用户消息先进历史，
+    // 截断就找不到那条待处理的回复了
+    try {
+      await fetch(`http://localhost:8050/llm/truncate_last`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          session_id: sessionIdRef.current,
+          spoken_text: spoken,
+        }),
+      });
+    } catch (err) {
+      console.warn('[HomeScreen] 截断历史失败:', err);
+    }
+  }, [abortLLM, stopForBargeIn, getSpokenText]);
+
   // 3. ASR
   const { start, stop: stopASR, status, isRecording, analyser } = useASR({
-    onTranscript: (text, isFinal, emotion) => {
+    onTranscript: async (text, isFinal, emotion) => {
       if (isFinal) {
+        // 老人又开口了：先把上一条还没说完的回复作废
+        await discardOngoingReply();
+
         setMessages((prev) => {
           const filtered = prev.filter((m) => !m.isInterim);
           const userMsg: ChatMessage = {
@@ -110,6 +166,8 @@ export default function HomeScreen() {
 
         const emotionLabel = emotion?.label || 'neutral';
         setCurrentEmotion(emotionLabel);
+        resetSpokenText();   // 新一轮回复开始，重置「已播出」的累计
+        replyInFlightRef.current = true;
         fetchReply(text, emotion, sessionIdRef.current);
       } else {
         setMessages((prev) => {
@@ -130,6 +188,38 @@ export default function HomeScreen() {
     },
     onError: (msg) => {
       setErrorMessage(msg);
+    },
+    /**
+     * 老人在 AI 说话时插话：立刻停声让他说，并把历史截断到实际播出去的部分。
+     *
+     * 截断这一步不能省——历史里存的是完整回复，模型会以为自己整段说完了，
+     * 下一轮可能引用老人根本没听到的后半截。
+     */
+    onBargeIn: () => {
+      const spoken = getSpokenText();
+      stopForBargeIn();
+
+      // 把气泡里的文字也收到实际听到的位置，屏幕和耳朵保持一致
+      setMessages((prev) => {
+        const idx = streamingIndexRef.current;
+        if (idx !== null && idx < prev.length && prev[idx].role === 'assistant') {
+          const updated = [...prev];
+          updated[idx] = { ...updated[idx], text: spoken, interrupted: true };
+          return updated;
+        }
+        return prev;
+      });
+      streamingIndexRef.current = null;
+      setIsLLMStreaming(false);
+
+      fetch(`http://localhost:8050/llm/truncate_last`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          session_id: sessionIdRef.current,
+          spoken_text: spoken,
+        }),
+      }).catch((err) => console.warn('[HomeScreen] 截断历史失败:', err));
     },
   });
 

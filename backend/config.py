@@ -39,8 +39,24 @@ ASR_BACKEND = os.getenv('ASR_BACKEND', 'dual')
 ASR_CLOUD_MODEL = 'paraformer-realtime-v2'
 ASR_CLOUD_FORMAT = 'pcm'
 ASR_CLOUD_LANGUAGE_HINTS = ['zh']
-# VAD 断句静音阈值（ms），老年人停顿较长，SDK 默认 800ms 偏短，设为 1200ms
-ASR_CLOUD_MAX_SENTENCE_SILENCE = int(os.getenv('ASR_CLOUD_MAX_SENTENCE_SILENCE', '1200'))
+# VAD 断句静音阈值（ms）。云端只负责**转写分段**，切碎一点没关系——
+# 「这一轮说完了没有」由下面的合并窗口判断。切得早反而有好处：中间结果能更快
+# 显示给老人看。
+ASR_CLOUD_MAX_SENTENCE_SILENCE = int(os.getenv('ASR_CLOUD_MAX_SENTENCE_SILENCE', '1000'))
+
+# ── 整句合并窗口 ─────────────────────────────────────────────────────────────
+# 云端给出一个 final 之后，先不急着交给 LLM，再等这么久：期间只要老人又开口
+# （收到新的中间结果），就说明刚才那只是句中停顿，把两段并起来当一句。
+#
+# 为什么不按尾部标点做自适应（第一版这么干过，是错的）：
+#   ASR 的标点是靠**韵律停顿**插进去的，老人边想边说，思考时的停顿会被插成
+#   句号。实测转写「上面写的名字。叫王翠芬。」——句号出现在一句连贯话的中间。
+#   于是"以句号结尾就少等"这条规则，恰好在老人话说到一半停顿时判定他说完了，
+#   反而更容易切断。标点在这里不是可靠信号，唯一可靠的信号是"他又开口了"。
+#
+# 所以只留一个统一窗口，宁可整体多等一点。对老年人而言，被打断的代价远大于
+# 多等半秒——这个值要在真实场景里调。
+ASR_MERGE_WINDOW_MS = int(os.getenv('ASR_MERGE_WINDOW_MS', '1400'))
 ASR_CLOUD_HEARTBEAT = True   # 静音时持续发送心跳保持连接不断开
 
 # ── Emotion Configuration (STEP 2) ────────────────────────────────────────────

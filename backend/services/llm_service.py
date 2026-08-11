@@ -736,6 +736,46 @@ class LLMService:
 
     # ─── 会话管理 ────────────────────────────────────────────────────────────
 
+    def truncate_last_reply(self, session_id: str, spoken_text: str) -> bool:
+        """
+        老人插话打断时，把历史里最后一条回复截断成**实际播出去**的那部分。
+
+        不做这件事的话，历史里存的是完整回复，模型以为自己整段都说完了，
+        下一轮可能出现「我刚才跟你说的那个……」——而老人根本没听到后半截。
+        对陪伴场景来说这不是小瑕疵：它会让老人觉得对方在说些莫名其妙的话。
+
+        spoken_text 为空（一个字都没播出去）时，整条回复从历史里移除。
+
+        Returns:
+            True 表示确实改动了历史，False 表示没有可截断的回复。
+        """
+        conversation = self.sessions.get(session_id)
+        if not conversation or conversation[-1]['role'] != 'assistant':
+            return False
+
+        spoken = (spoken_text or '').strip()
+        original = conversation[-1]['content']
+        if spoken == original:
+            return False
+
+        if spoken:
+            conversation[-1]['content'] = spoken
+        else:
+            conversation.pop()
+
+        # 提问节制是按"回复是不是以问句结尾"统计的，截断后要按实际说出口的重算
+        meta = self._get_session_meta(session_id)
+        if spoken.endswith(('？', '?')):
+            pass                       # 截断后仍是问句，计数不变
+        else:
+            meta['consecutive_questions'] = 0
+
+        logger.info(
+            f"回复被打断，历史已截断 | Session: {session_id} | "
+            f"{len(original)} 字 → {len(spoken)} 字"
+        )
+        return True
+
     async def close_session(self, session_id: str = 'default', elder_id: str = ''):
         """
         会话正常结束时调用：把还没压缩的历史并进摘要，再把本次摘要留档进台账。
