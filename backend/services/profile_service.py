@@ -22,9 +22,15 @@ from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 from typing import Optional
 
-from config import ELICIT_MAX_ASK_COUNT, PROFILE_DIR
+from openai import AsyncOpenAI
+
+from config import (
+    ELICIT_MAX_ASK_COUNT, PROFILE_DIR,
+    DEEPSEEK_API_KEY, DEEPSEEK_BASE_URL, DEEPSEEK_MODEL, ROUTER_EXTRA_BODY,
+)
 from services.profile_schema import (
-    SLOTS, OBSERVABLE_SLOTS, askable_by_priority, is_valid_slot, slot_zh,
+    SLOTS, ASKABLE_SLOTS, OBSERVABLE_SLOTS,
+    askable_by_priority, is_askable, is_valid_slot, slot_zh,
 )
 
 logger = logging.getLogger(__name__)
@@ -277,6 +283,46 @@ def _render_observations(slots: dict) -> list[str]:
     return out
 
 
+# ─── 抽取 prompt ─────────────────────────────────────────────────────────────
+
+def _build_extract_prompt() -> str:
+    """从 schema 动态生成候选字段清单，不手写第二份。"""
+    lines = '\n'.join(
+        f'- {name}：{slot_zh(name)}' for name in ASKABLE_SLOTS
+    )
+    return f"""\
+你是老年人陪伴系统的「画像抽取」模块。从老人刚说的这句话里，抽出下面这些方面的
+信息，输出 JSON。
+
+## 最重要的规则
+只抽取老人**自己说出来的**内容。绝对不要推测、不要补全、不要把常识当事实。
+- 老人说「我老家保定的」→ 可以记 hometown: 河北保定
+- 老人说「我老家保定的」→ 不能记 hometown 之外的任何字段
+宁可少记，不能记错。记错了会在后面的对话里被当成真事反复引用，比没记更糟。
+
+## 可以抽的字段
+{lines}
+
+## 特别说明
+- birth_year 只填**四位出生年份**。老人说"我今年八十三了"时，如果你能从对话里
+  确定当前年份就换算成出生年份；换算不确定就留空，不要填年龄数字。
+- medication_times 只记**什么时候吃**，不要记剂量。
+- address 是他希望**别人怎么称呼他**（「王老师」「老王」「翠芬」都行），
+  照他自己说的写，不要加「阿姨」「大爷」这种后缀。
+
+## 输出格式
+只输出一个 JSON 对象，不要 markdown 代码块，不要任何解释。只放这句话里真的
+提到了的字段，其他字段不要出现：
+
+{{"hometown": "河北保定"}}
+
+这句话里没有值得记的，就输出 {{}}。这是很常见的情况，不要硬凑。
+"""
+
+
+PROFILE_EXTRACT_SYSTEM_PROMPT = _build_extract_prompt()
+
+
 # ─── 服务 ────────────────────────────────────────────────────────────────────
 
 
@@ -291,6 +337,13 @@ class ProfileService:
     def __init__(self, storage_dir: str = PROFILE_DIR):
         self.storage_dir = Path(storage_dir)
         self._profiles: dict[str, dict] = {}
+
+        # 抽取用轻量模型，与主生成模型完全分离
+        self.client = AsyncOpenAI(
+            api_key  = DEEPSEEK_API_KEY,
+            base_url = DEEPSEEK_BASE_URL,
+        )
+
         logger.info(f"画像服务初始化完成 ✅ (存储目录: {self.storage_dir})")
 
     # ─── 读取 ───────────────────────────────────────────────────────────
@@ -324,6 +377,60 @@ class ProfileService:
         """把内存里的画像落盘。"""
         if elder_id in self._profiles:
             self._save(elder_id, self._profiles[elder_id])
+
+    # ─── 抽取（后台异步）───────────────────────────────────────────────────
+
+    async def observe_turn(self, elder_id: str, user_text: str) -> dict:
+        """从老人这一句话里抽画像字段，合并进画像并落盘。
+
+        只传 user_text——不传 AI 的回复。AI 回复是生成出来的，可能含幻觉，
+        把它当事实写进画像等于把幻觉洗成记忆（沿用台账最重要的那条约束）。
+        """
+        if not user_text.strip():
+            return {}
+
+        raw = await self._extract(user_text)
+        if not raw:
+            return {}
+
+        profile = self.get_profile(elder_id)
+        applied: dict = {}
+        for name, value in raw.items():
+            if not is_askable(name) or not str(value).strip():
+                continue
+            if name == 'birth_year':
+                # 走校验器，拒绝年龄数字
+                if set_birth_year(profile, value, evidence=user_text[:60]):
+                    applied[name] = str(value).strip()
+                continue
+            mark_filled(profile, name, str(value), evidence=user_text[:60])
+            applied[name] = str(value).strip()
+
+        if applied:
+            self._save(elder_id, profile)
+            logger.info(f"画像更新 | elder={elder_id} | {list(applied)}")
+        return applied
+
+    async def _extract(self, user_text: str) -> dict:
+        try:
+            resp = await self.client.chat.completions.create(
+                model=DEEPSEEK_MODEL,
+                messages=[
+                    {'role': 'system', 'content': PROFILE_EXTRACT_SYSTEM_PROMPT},
+                    {'role': 'user',   'content': f'老人说：「{user_text}」'},
+                ],
+                temperature=0.0,
+                max_tokens=300,
+                response_format={'type': 'json_object'},
+                extra_body=ROUTER_EXTRA_BODY,
+            )
+            raw = resp.choices[0].message.content
+            data = json.loads(raw.strip()) if raw else {}
+            return data if isinstance(data, dict) else {}
+        except Exception as e:
+            # 画像是增强能力，抽取失败不该影响对话本身
+            logger.warning(f"画像抽取失败（忽略，不影响对话）: {e}")
+            return {}
 
     # ─── 持久化 ─────────────────────────────────────────────────────────
 
