@@ -38,8 +38,10 @@ from prompts.templates import (
     build_router_user_prompt,
     resolve_strategy_id,
     CATEGORY_STRATEGY_MAP,
+    build_elicitation_block,
 )
 from services.profile_schema import is_askable
+from services.elicitation import MODE_NONE, plan_elicitation
 
 logger = logging.getLogger(__name__)
 
@@ -89,10 +91,13 @@ class LLMService:
       中性的话识别成"同一段叙事的延续"，而不是逐句独立判断导致中途误判成 neutral。
     """
 
-    def __init__(self, memory_service=None):
+    def __init__(self, memory_service=None, profile_service=None):
         # 长程记忆服务（MemoryService）。为 None 时整套记忆逻辑静默跳过，
         # 对话本身照常工作——记忆是增强能力，不是对话的前置依赖。
         self.memory = memory_service
+        # 画像服务。为 None 时整套采集逻辑静默跳过，对话照常工作——
+        # 和记忆一样，画像是增强能力，不是对话的前置依赖。
+        self.profile = profile_service
         # 后台任务引用：asyncio 只持弱引用，不自己存着的话任务可能被 GC 掉
         self._bg_tasks: set = set()
         # 已滑出历史窗口、等待压缩进摘要的消息：{session_id: [msg, ...]}
@@ -308,6 +313,10 @@ class LLMService:
                 'started_at': datetime.now(timezone.utc),
                 'turn_count': 0,
                 'consecutive_questions': 0,
+                # ── 采集节奏（设计文档 §4.2/§4.3）──
+                'elicited_count': 0,      # 本会话已主动起了几个话头（不含 address）
+                'last_elicit_turn': -999, # 上次主动采集在第几轮，用于冷却
+                'address_asked': False,   # 本会话是否已问过称呼
             }
         return self.session_meta[session_id]
 
@@ -498,6 +507,31 @@ class LLMService:
         else:
             self._decay_crisis_vigilance(session_id)
 
+        # ── 步骤 3.6：采集规划（纯逻辑，不调 LLM）─────────────────────────────
+        meta = self._get_session_meta(session_id)
+        elicit_block = ''
+        plan = None
+        if self.profile is not None:
+            try:
+                plan = plan_elicitation(
+                    self.profile.get_profile(elder_id),
+                    slot_hint                  = slot_hint,
+                    category                   = category,
+                    phase                      = self.get_phase(session_id),
+                    crisis                     = crisis,
+                    crisis_vigilant            = crisis_vigilant,
+                    restrain_questions         = self._should_restrain_questions(session_id),
+                    turns_since_last_elicit    = meta['turn_count'] - meta['last_elicit_turn'],
+                    elicited_this_session      = meta['elicited_count'],
+                    address_asked_this_session = meta['address_asked'],
+                )
+                if plan.mode != MODE_NONE:
+                    elicit_block = build_elicitation_block(plan.mode, plan.slot, plan.is_stale)
+            except Exception as e:
+                # 采集失败不影响对话（设计文档 §9）
+                logger.warning(f"采集规划失败（忽略，不影响对话）: {e}")
+                plan = None
+
         # ── 步骤 4：构建 System Prompt ──────────────────────────────────────
         if crisis:
             system_prompt = build_crisis_prompt()
@@ -508,6 +542,8 @@ class LLMService:
                 session_summary = self.memory.get_summary(session_id) if self.memory else '',
                 phase              = self.get_phase(session_id),
                 restrain_questions = self._should_restrain_questions(session_id),
+                profile_context   = self.profile.get_context(elder_id) if self.profile else '',
+                elicitation_block = elicit_block,
             )
             if crisis_vigilant:
                 logger.info(f"危机警惕期生效 | Session: {session_id} | 剩余 {self.crisis_vigilance.get(session_id, 0)} 轮")
@@ -587,6 +623,19 @@ class LLMService:
             self._note_reply_shape(session_id, full_reply)
 
         self._get_session_meta(session_id)['turn_count'] += 1
+
+        # ── 步骤 10.4：推进采集计数（问出去了才算，规划器只是打算）──────────────
+        if plan is not None and plan.mode != MODE_NONE and self.profile is not None:
+            try:
+                self.profile.note_asked(elder_id, plan.slot)
+                if plan.slot == 'address':
+                    # address 不计入会话名额：它不是采集，是自我介绍的一部分
+                    meta['address_asked'] = True
+                else:
+                    meta['elicited_count'] += 1
+                    meta['last_elicit_turn'] = meta['turn_count']
+            except Exception as e:
+                logger.warning(f"采集计数推进失败（忽略）: {e}")
 
         # ── 步骤 10.5：安排记忆的后台工作（不阻塞本轮回复）────────────────────
         self._schedule_memory_work(elder_id, session_id, user_text, dropped, crisis)

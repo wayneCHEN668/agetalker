@@ -517,11 +517,17 @@ NORMAL_SYSTEM_PROMPT = """\
 ## 你已经知道的事（都是他以前自己说过的）
 {memory_block}
 
+## 你了解的他这个人
+{profile_block}
+
 ## 这次聊天到现在
 {summary_block}
 
 ## 这次聊天的节奏
 {pacing_block}
+
+## 这一轮顺带留意的
+{elicitation_block}
 
 ## 说话风格
 - 像老朋友聊天一样，用「你」不用「您」
@@ -628,6 +634,43 @@ def build_pacing_block(phase: str, restrain_questions: bool) -> str:
     return text
 
 
+# ─── 画像引导采集 ────────────────────────────────────────────────────────────
+# 采集不抢策略的决策权（设计文档 §4.4）：策略仍然决定这一轮 AI 要做什么，
+# 这一段只是追加一句"顺带关心一下 X"。冲突时策略优先。
+
+def build_elicitation_block(mode: str, slot_name: str, is_stale: bool) -> str:
+    """把采集规划器的决策翻译成给生成模型看的一句话。"""
+    if mode == 'none' or not slot_name:
+        return '（这一轮没什么要打听的，正常聊就行。）'
+
+    zh = slot_zh(slot_name)
+
+    if mode == 'follow_up':
+        return (
+            f'他刚才的话里顺带提到了「{zh}」。顺着他自己开的这个话头，自然地多'
+            f'关心一句就行——**不要转移话题**，不要连着追问，一句就够。'
+        )
+
+    if is_stale:
+        return (
+            f'「{zh}」这件事以前记过，但有段时间了，可能过时了。找个自然的地方'
+            f'用**确认**的语气顺口问一下（比如「您那个……这阵子还……不」），'
+            f'不要当成头一回问——把人当陌生人重新问一遍，他会觉得你把他忘了。'
+        )
+
+    if slot_name == 'address':
+        return (
+            '你还不知道该怎么称呼他。找个自然的地方问一句（比如「我该怎么称呼您'
+            '呀」）。这不是查户口——不知道怎么称呼就聊天本来才是失礼。'
+            '他说什么就是什么，别自作主张给他加「阿姨」「大爷」这种后缀。'
+        )
+
+    return (
+        f'如果这一轮有自然的地方，可以从「{zh}」轻轻起个话头，了解一下。'
+        f'**只是顺口一提，不要盘问**；他要是没接这个茬，就顺着他说的走，别追。'
+    )
+
+
 # ─── 危机警惕态附加段 ────────────────────────────────────────────────────────
 # 危机不是一轮就翻篇的事。命中危机之后的几轮，对方往往表面上平复了、话题也转开了，
 # 但风险并没有随之消失。这一段附加在常规 prompt 末尾（不替换常规 prompt），
@@ -676,6 +719,8 @@ def build_normal_prompt(
     session_summary: str = "",
     phase: str = "deepening",
     restrain_questions: bool = False,
+    profile_context: str = "",
+    elicitation_block: str = "",
 ) -> str:
     """
     根据 STEP 1 路由结果（category + strategy_id）和声学情绪识别结果（emotion）
@@ -704,6 +749,11 @@ def build_normal_prompt(
             内容全部来自老人以前自己说过的话。为空时填入占位说明。
         session_summary: 本次会话的滚动摘要（MemoryService.get_summary），
             覆盖已经滑出对话历史窗口的那部分内容。为空时填入占位说明。
+        profile_context: 结构化画像渲染成的文本（ProfileService.get_context），
+            内容全部来自老人以前自己说过的话。为空时填入占位说明。
+        elicitation_block: 采集规划器（plan_elicitation）的决策翻译成的一句话
+            （build_elicitation_block 的返回值）。为空时填入占位说明——采集不抢
+            策略的决策权，这段只是追加提示，冲突时策略优先。
 
     Returns:
         拼装完成的 system prompt 字符串。
@@ -736,6 +786,8 @@ def build_normal_prompt(
         memory_block            = memory_context or "（还没记下什么——可能是刚开始聊，也可能他还没说过具体的事。别假装记得。）",
         summary_block           = session_summary or "（刚开始聊，还没有更早的内容。）",
         pacing_block            = build_pacing_block(phase, restrain_questions),
+        profile_block           = profile_context or "（还不太了解他的情况。）",
+        elicitation_block       = elicitation_block or "（这一轮没什么要打听的，正常聊就行。）",
         forbidden                = cat_cfg['forbidden'],
         strategy_name             = strategy['name'],
         strategy_desc              = strategy['desc'],
