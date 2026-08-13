@@ -39,6 +39,7 @@ from prompts.templates import (
     resolve_strategy_id,
     CATEGORY_STRATEGY_MAP,
 )
+from services.profile_schema import is_askable
 
 logger = logging.getLogger(__name__)
 
@@ -131,7 +132,7 @@ class LLMService:
         used_strategies: str = "",
         crisis_recent: bool = False,
         strategy_feedback: str = "",
-    ) -> tuple[str, str, str]:
+    ) -> tuple[str, str, str, str]:
         """
         调用独立的路由模型（DeepSeek），判断当前这句话的心理类别，并选出这一轮
         该用的具体策略 id。
@@ -158,10 +159,12 @@ class LLMService:
                 风险已经过去。
 
         Returns:
-            (category, matched_signals, strategy_id)
+            (category, matched_signals, strategy_id, slot_hint)
             strategy_id 为空字符串时，表示路由没有给出有效策略（is_crisis、解析
             失败、或返回的 id 不在该类别策略列表内），下游会通过 resolve_strategy_id()
             兜底为该类别的第一条策略。
+            slot_hint 为空字符串时，表示这一轮没有采集线索（没提到、拿不准、
+            或返回了非法字段名）。
         """
         try:
             resp = await self.router_client.chat.completions.create(
@@ -185,7 +188,7 @@ class LLMService:
             raw = resp.choices[0].message.content
             if not raw:
                 logger.warning("路由调用返回空内容，降级为 neutral")
-                return 'neutral', '', ''
+                return 'neutral', '', '', ''
 
             result = json.loads(raw.strip())
             category = result.get('category', 'neutral')
@@ -193,12 +196,18 @@ class LLMService:
             matched_signals = result.get('matched_signals', '')
             strategy_id = result.get('strategy_id', '')
 
+            # 采集线索：非法字段名一律当空（设计文档 §4.1）。
+            # 采集是增强能力，报错的线索宁可丢掉，也不能让它污染这一轮。
+            slot_hint = result.get('slot_hint', '') or ''
+            if not is_askable(slot_hint):
+                slot_hint = ''
+
             if is_crisis or category == 'crisis':
-                return 'crisis', matched_signals, ''
+                return 'crisis', matched_signals, '', ''
 
             if category not in CATEGORY_STRATEGY_MAP:
                 logger.warning(f"路由模型返回未知类别 '{category}'，降级为 neutral")
-                return 'neutral', matched_signals, ''
+                return 'neutral', matched_signals, '', slot_hint
 
             valid_ids = {s['id'] for s in CATEGORY_STRATEGY_MAP[category]['strategies']}
             if strategy_id not in valid_ids:
@@ -213,11 +222,11 @@ class LLMService:
                 f"路由结果: category={category}, strategy_id={strategy_id or '(待兜底)'}, "
                 f"signals={matched_signals}"
             )
-            return category, matched_signals, strategy_id
+            return category, matched_signals, strategy_id, slot_hint
 
         except Exception as e:
             logger.error(f"路由调用失败: {e}，降级为 neutral")
-            return 'neutral', '路由暂不可用', ''
+            return 'neutral', '路由暂不可用', '', ''
 
     @staticmethod
     def _build_router_context(conversation: list[dict], turns: int) -> str:
@@ -438,6 +447,7 @@ class LLMService:
         matched_signals = ''
         strategy_id = ''
         strategy_name = ''
+        slot_hint = ''            # 路由未跑（危机命中）时保持空
         crisis = self._check_crisis(user_text)
         # 本轮开始时是否已处于警惕期——要在下面可能重新置位之前先取出来
         crisis_vigilant = self._is_crisis_vigilant(session_id)
@@ -452,7 +462,7 @@ class LLMService:
             last_category = self.last_category.get(session_id, '')
             # 先结算上一条策略的效果，再让路由决定这一轮该不该往下推进
             strategy_feedback = self._settle_last_strategy(session_id, emotion)
-            category, matched_signals, raw_strategy_id = await self._route_category(
+            category, matched_signals, raw_strategy_id, slot_hint = await self._route_category(
                 user_text, context, last_category, used_strategies,
                 crisis_recent=crisis_vigilant,
                 strategy_feedback=strategy_feedback,

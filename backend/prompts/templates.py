@@ -86,6 +86,7 @@ CRISIS_KEYWORDS 动态生成（与 _build_strategy_menu_section() 对策略库�
 """
 
 from config import CRISIS_KEYWORDS
+from services.profile_schema import ASKABLE_SLOTS, slot_zh
 
 # --------------------------------------------------------------------------- #
 # STEP 2 的数据先定义：按心理类别组织的红线 + 结构化策略库
@@ -318,6 +319,30 @@ def _build_strategy_menu_section() -> str:
 # STEP 1：心理类别 + 策略路由（独立轻量调用，与生成调用分离）
 # --------------------------------------------------------------------------- #
 
+def _build_slot_hint_section() -> str:
+    """生成路由 prompt 里"采集线索"这条规则的候选字段清单。
+
+    清单从 profile_schema.ASKABLE_SLOTS 动态生成，不手写第二份——手写会和
+    schema 漂移（schema 加了字段，prompt 不会跟着更新）。这和策略库、危机词表
+    的处理方式一致。
+
+    只列 askable：observable 字段（性格、情绪基线）永远不问，external 字段
+    （位置、药名）由家属/设备录入，两者都不该出现在候选里。
+    """
+    items = '、'.join(f'{name}（{slot_zh(name)}）' for name in ASKABLE_SLOTS)
+    return (
+        '\n## 采集线索（附带判断，不影响上面的类别与策略）\n'
+        '老人这句话里，有没有顺带露出下面某个方面的信息？有就把对应的字段名填进 '
+        'slot_hint，没有就填空字符串。\n'
+        f'候选字段：{items}\n'
+        '注意：\n'
+        '- 这只是"他提到了这个方面"，不要求他把话说完整。比如"昨晚翻来覆去的"'
+        '就算 sleep 的线索。\n'
+        '- 拿不准就填空。宁可漏掉，也不要报一个牵强的字段。\n'
+        '- 只能填上面列出的字段名，不要自己造新的。\n'
+    )
+
+
 def _build_crisis_signal_section() -> str:
     """
     根据 config.CRISIS_KEYWORDS 动态生成路由 prompt 里"高危熔断"这条规则的示例词文本。
@@ -402,7 +427,8 @@ _ROUTER_OUTPUT_FORMAT = """\
   "category": "depression | anxiety | anger | loneliness | grief | positive | neutral | crisis",
   "is_crisis": true 或 false,
   "matched_signals": "≤15字，简要说明匹配到的信号",
-  "strategy_id": "从对应 category 的策略库里选一个 id；is_crisis=true 时留空字符串"
+  "strategy_id": "从对应 category 的策略库里选一个 id；is_crisis=true 时留空字符串",
+  "slot_hint": "这句话露出线索的字段名；没有就留空字符串"
 }
 """
 
@@ -413,6 +439,7 @@ ROUTER_SYSTEM_PROMPT = (
     + _build_crisis_signal_section()
     + '\n'
     + _build_strategy_menu_section()
+    + _build_slot_hint_section()
     + _ROUTER_OUTPUT_FORMAT
 )
 
