@@ -218,6 +218,49 @@ MEMORY_SUMMARY_MAX_CHARS    = 400
 # 跨会话保留多少段历史会话摘要（供"上次咱们聊到…"这类回指）
 MEMORY_MAX_SESSION_SUMMARIES = 5
 
+# ── 画像与引导采集（设计文档 2026-08-13）──────────────────────────────────────
+# 画像与台账是两个东西：台账是叙事记忆（自由文本、无限增长），画像是结构化
+# 状态机（有限字段、能判断"填了没有"）。后者是"不重复询问"的前提。
+PROFILE_DIR = os.getenv('PROFILE_DIR', 'data/profiles')
+
+# 一次会话最多主动起几个话头采集。一次对话可能只有 10-20 轮，问 5 条就意味着
+# 25% 以上的轮次在采集，老人一定会察觉到味道变了。
+# 注意：address 的首次询问不计入这个上限（它不是采集，是自我介绍的一部分）。
+ELICIT_MAX_PER_SESSION = 2
+# 两次主动采集之间至少隔多少轮，把上面那 2 次撑开到整段对话里
+ELICIT_COOLDOWN_TURNS = 5
+# 同一个字段问到第几次仍未填上就永久放弃。
+# 这是整套机制里最重要的一道硬闸：没有它，"安全窗口""节流"都只是降低频率，
+# 一个永远填不上的字段最终一定会被问到第五次、第十次。
+ELICIT_MAX_ASK_COUNT = 2
+
+# 观察类字段的最小样本量。样本不足时宁可留空——错误的性格判断会一直影响
+# 后续所有对话的语气。
+OBSERVE_MIN_TURNS         = 20   # talkativeness / interaction_preference
+OBSERVE_MIN_TURNS_EMOTION = 30   # emotional_baseline
+OBSERVE_MIN_SESSIONS      = 5    # attention_span
+
+# ── 主动开口 ─────────────────────────────────────────────────────────────────
+# 老人开着对话但静默多久之后，AI 先开口。远长于 ASR_SILENCE_FRAMES 的 1.5 秒
+# 断句阈值——那个是"这句话说完了没有"，这个是"他是不是不想说了"。
+# 量级估计，必须实机调；调错方向时宁可往长了调（被打断的代价大于多等一会儿）。
+SILENCE_PROMPT_SEC = 25
+
+# 定时招呼说完后开麦等多久算没人应答。略短于沉默唤起——没人应答时不该比
+# 有人时等更久。
+PROACTIVE_NO_ANSWER_SEC = 20
+# 当天连续几次没人应答就停手。没有这条，设备会变成定时扰民的喇叭，
+# 而且扰的是隔壁床的人。
+PROACTIVE_NO_ANSWER_GIVEUP = 2
+# 当天最多主动招呼几次（早中晚的量级，超过就是打扰）
+PROACTIVE_MAX_PER_DAY = 3
+
+# 夜间硬静默窗口（本地时间，含起点不含终点：21:00 <= t 或 t < 07:00 时静默）。
+# 这是防配置错误的兜底：daily_routine 是 LLM 从口语里抽的，抽错一个数字就
+# 可能变成半夜三点自己说话。采集来的数据不能直接驱动会发出声音的行为。
+PROACTIVE_QUIET_START = 21
+PROACTIVE_QUIET_END   = 7
+
 # ── TTS Emotion Mapping (STEP 4) ─────────────────────────────────────────────
 # Note: TTS emotions are "healing symmetries" to the user's emotion
 TTS_PARAMS_MAP = {
