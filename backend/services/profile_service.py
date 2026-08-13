@@ -17,11 +17,13 @@
 """
 
 import logging
-from datetime import datetime, timedelta, timezone
+from datetime import date, datetime, timedelta, timezone
 from typing import Optional
 
 from config import ELICIT_MAX_ASK_COUNT
-from services.profile_schema import SLOTS, is_valid_slot
+from services.profile_schema import (
+    SLOTS, OBSERVABLE_SLOTS, askable_by_priority, is_valid_slot, slot_zh,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -171,3 +173,103 @@ def needs_attention(profile: dict, slot_name: str) -> bool:
     if slot is None:
         return False
     return slot['status'] in (STATUS_UNKNOWN, STATUS_ASKED, STATUS_STALE)
+
+
+# ─── address / birth_year 特殊路径 ───────────────────────────────────────────
+
+# 称呼未知或被拒绝时的兜底。绝不留空、绝不自己编一个称呼——
+# 编错称呼比不叫名字伤人得多（设计文档 §3.5）。
+DEFAULT_ADDRESS = '您'
+
+
+def render_address(profile: dict) -> str:
+    """该怎么称呼他。任何拿不准的情况一律返回「您」。"""
+    slot = profile.get('slots', {}).get('address')
+    if slot and slot['status'] == STATUS_FILLED and slot['value'].strip():
+        return slot['value'].strip()
+    return DEFAULT_ADDRESS
+
+
+def set_birth_year(
+    profile: dict,
+    raw_value,
+    source: str = 'conversation',
+    evidence: str = '',
+    now: Optional[datetime] = None,
+) -> bool:
+    """写入出生年份。只接受四位年份，成功返回 True。
+
+    传进来一个年龄数字（比如 83）会被拒绝：存年龄一年后就是错的，而且没有
+    任何机制会发现它错了。年龄由 compute_age() 每次读时算（设计文档 §3.6）。
+    """
+    try:
+        year = int(str(raw_value).strip())
+    except (TypeError, ValueError):
+        return False
+    this_year = (now or _now()).year
+    if not (1900 <= year <= this_year):
+        return False
+    mark_filled(profile, 'birth_year', str(year), source=source,
+                evidence=evidence, now=now)
+    return True
+
+
+def compute_age(profile: dict, today: Optional[date] = None) -> Optional[int]:
+    """按当前日期算年龄。拿不准时返回 None——猜错会让 AI 聊一个他没经历过的年代。"""
+    slot = profile.get('slots', {}).get('birth_year')
+    if not slot or not slot['value']:
+        return None
+    try:
+        year = int(slot['value'])
+    except ValueError:
+        return None
+    today = today or _now().date()
+    if not (1900 <= year <= today.year):
+        return None
+    return today.year - year
+
+
+def render_profile(profile: dict) -> str:
+    """渲染成注入 system prompt 的文本。没有任何已知内容时返回空串。
+
+    只渲染真正有值的字段（filled / stale）。asked-but-unanswered 绝不出现——
+    那会让模型以为自己知道点什么，然后编。
+    """
+    if not profile:
+        return ''
+
+    lines: list[str] = []
+    slots = profile.get('slots', {})
+
+    age = compute_age(profile)
+    if age is not None:
+        lines.append(f'- 岁数：{age} 岁')
+
+    for name in askable_by_priority():
+        if name == 'birth_year':
+            continue                       # 上面已经按年龄渲染过了
+        slot = slots.get(name)
+        if not slot or slot['status'] not in (STATUS_FILLED, STATUS_STALE):
+            continue
+        if not slot['value'].strip():
+            continue
+        suffix = '（以前记的，可能过时了，可以顺口确认一下）' \
+            if slot['status'] == STATUS_STALE else ''
+        lines.append(f'- {slot_zh(name)}：{slot["value"]}{suffix}')
+
+    observed = _render_observations(slots)
+    if observed:
+        lines.append('【看下来他的性子】')
+        lines.extend(observed)
+
+    return '\n'.join(lines)
+
+
+def _render_observations(slots: dict) -> list[str]:
+    """观察类字段。样本不足时它们本来就是 unknown，这里自然不会渲染出来。"""
+    out: list[str] = []
+    for name in OBSERVABLE_SLOTS:
+        slot = slots.get(name)
+        if slot and slot['status'] == STATUS_FILLED and slot['value'].strip():
+            out.append(f'- {slot_zh(name)}：{slot["value"]}')
+    return out
