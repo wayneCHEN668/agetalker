@@ -45,6 +45,14 @@ def test_corrupted_file_falls_back_to_empty(tmp_path):
     assert p['slots']['hometown']['status'] == 'unknown'
 
 
+def test_non_dict_json_falls_back_to_empty(tmp_path):
+    """合法 JSON 但顶层不是对象（比如 null）：按空画像处理，不能抛异常。"""
+    (tmp_path / 'elder_x.json').write_text('null', encoding='utf-8')
+    svc = ProfileService(storage_dir=str(tmp_path))
+    p = svc.get_profile('elder_x')
+    assert p['slots']['hometown']['status'] == 'unknown'
+
+
 def test_missing_fields_are_backfilled(tmp_path):
     """早期文件缺字段时补齐，不能 KeyError。"""
     (tmp_path / 'elder_c.json').write_text(

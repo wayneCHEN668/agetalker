@@ -338,20 +338,22 @@ class ProfileService:
             return empty_profile(elder_id)
         try:
             data = json.loads(path.read_text(encoding='utf-8'))
+            if not isinstance(data, dict):
+                raise ValueError(f'画像文件顶层不是对象: {type(data).__name__}')
+
+            # 字段补齐：早期文件可能缺 slot、缺 slot 内的键
+            base = empty_profile(elder_id)
+            for name, slot in (data.get('slots') or {}).items():
+                if name in base['slots'] and isinstance(slot, dict):
+                    base['slots'][name].update(
+                        {k: v for k, v in slot.items() if k in base['slots'][name]}
+                    )
+            if isinstance(data.get('observations'), dict):
+                base['observations'] = data['observations']
+            return base
         except Exception as e:
             logger.error(f"画像读取失败，按空画像处理 ({path}): {e}")
             return empty_profile(elder_id)
-
-        # 字段补齐：早期文件可能缺 slot、缺 slot 内的键
-        base = empty_profile(elder_id)
-        for name, slot in (data.get('slots') or {}).items():
-            if name in base['slots'] and isinstance(slot, dict):
-                base['slots'][name].update(
-                    {k: v for k, v in slot.items() if k in base['slots'][name]}
-                )
-        if isinstance(data.get('observations'), dict):
-            base['observations'] = data['observations']
-        return base
 
     def _save(self, elder_id: str, profile: dict) -> None:
         path = self._path(elder_id)
