@@ -16,11 +16,13 @@
 采到，该问"。所以 asked 必须是独立于 filled 的状态。
 """
 
+import json
 import logging
 from datetime import date, datetime, timedelta, timezone
+from pathlib import Path
 from typing import Optional
 
-from config import ELICIT_MAX_ASK_COUNT
+from config import ELICIT_MAX_ASK_COUNT, PROFILE_DIR
 from services.profile_schema import (
     SLOTS, OBSERVABLE_SLOTS, askable_by_priority, is_valid_slot, slot_zh,
 )
@@ -273,3 +275,95 @@ def _render_observations(slots: dict) -> list[str]:
         if slot and slot['status'] == STATUS_FILLED and slot['value'].strip():
             out.append(f'- {slot_zh(name)}：{slot["value"]}')
     return out
+
+
+# ─── 服务 ────────────────────────────────────────────────────────────────────
+
+
+class ProfileService:
+    """画像服务。
+
+    存储独立于台账（独立文件、独立锁）：两者逻辑正交，台账是"合并叙事文本"，
+    画像是"状态机推进"。塞进同一个文件就得共享锁，而 memory_service 已经
+    440 行，再加一套状态机会让它变成什么都干的模块（设计文档 §7.3）。
+    """
+
+    def __init__(self, storage_dir: str = PROFILE_DIR):
+        self.storage_dir = Path(storage_dir)
+        self._profiles: dict[str, dict] = {}
+        logger.info(f"画像服务初始化完成 ✅ (存储目录: {self.storage_dir})")
+
+    # ─── 读取 ───────────────────────────────────────────────────────────
+
+    def get_profile(self, elder_id: str) -> dict:
+        """取画像，首次访问时从磁盘惰性加载，并顺手把过期字段转成 stale。"""
+        if elder_id not in self._profiles:
+            profile = self._load(elder_id)
+            if refresh_stale(profile):
+                self._save(elder_id, profile)
+            self._profiles[elder_id] = profile
+        return self._profiles[elder_id]
+
+    def get_context(self, elder_id: str) -> str:
+        """注入 system prompt 的画像文本。"""
+        return render_profile(self.get_profile(elder_id))
+
+    def get_address(self, elder_id: str) -> str:
+        """该怎么称呼他。拿不准一律「您」。"""
+        return render_address(self.get_profile(elder_id))
+
+    # ─── 写入 ───────────────────────────────────────────────────────────
+
+    def note_asked(self, elder_id: str, slot_name: str) -> None:
+        """记录问过某个字段，并落盘。"""
+        profile = self.get_profile(elder_id)
+        mark_asked(profile, slot_name)
+        self._save(elder_id, profile)
+
+    def save(self, elder_id: str) -> None:
+        """把内存里的画像落盘。"""
+        if elder_id in self._profiles:
+            self._save(elder_id, self._profiles[elder_id])
+
+    # ─── 持久化 ─────────────────────────────────────────────────────────
+
+    def _path(self, elder_id: str) -> Path:
+        # elder_id 来自客户端，做一次保守清洗防止路径穿越（沿用台账做法）
+        safe = ''.join(c for c in elder_id if c.isalnum() or c in '-_')[:64] or 'unknown'
+        return self.storage_dir / f'{safe}.json'
+
+    def _load(self, elder_id: str) -> dict:
+        path = self._path(elder_id)
+        if not path.exists():
+            return empty_profile(elder_id)
+        try:
+            data = json.loads(path.read_text(encoding='utf-8'))
+        except Exception as e:
+            logger.error(f"画像读取失败，按空画像处理 ({path}): {e}")
+            return empty_profile(elder_id)
+
+        # 字段补齐：早期文件可能缺 slot、缺 slot 内的键
+        base = empty_profile(elder_id)
+        for name, slot in (data.get('slots') or {}).items():
+            if name in base['slots'] and isinstance(slot, dict):
+                base['slots'][name].update(
+                    {k: v for k, v in slot.items() if k in base['slots'][name]}
+                )
+        if isinstance(data.get('observations'), dict):
+            base['observations'] = data['observations']
+        return base
+
+    def _save(self, elder_id: str, profile: dict) -> None:
+        path = self._path(elder_id)
+        try:
+            path.parent.mkdir(parents=True, exist_ok=True)
+            # 先写临时文件再替换，避免写到一半被读到半个 JSON
+            tmp = path.with_suffix('.json.tmp')
+            tmp.write_text(
+                json.dumps(profile, ensure_ascii=False, indent=2),
+                encoding='utf-8',
+            )
+            tmp.replace(path)
+        except Exception as e:
+            # 画像是增强能力，写不进去也不能影响这一轮对话
+            logger.error(f"画像写入失败 ({path}): {e}")
