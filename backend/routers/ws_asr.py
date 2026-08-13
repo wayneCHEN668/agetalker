@@ -11,6 +11,7 @@ ASR WebSocket 路由（双模式：云端流式 + 本地兜底）。
 import asyncio
 import json
 import logging
+import time
 from datetime import datetime, timezone, timedelta
 
 import numpy as np
@@ -164,8 +165,15 @@ async def _handle_cloud_session(
             else:
                 audio_for_emotion = np.zeros(16000, dtype=np.float32)
 
+        # 情绪识别在关键路径上（转录要等它算完才发给前端）。合并整句之后音频
+        # 变长了，CPU 上跑 emotion2vec 的耗时也跟着涨，这里记下来好定位。
+        _t_emo = time.monotonic()
         emotion_res = await asyncio.to_thread(
             emotion_service.analyze, audio_for_emotion, session_id,
+        )
+        logger.info(
+            f"⏱ 情绪识别 {(time.monotonic()-_t_emo)*1000:.0f}ms "
+            f"({len(audio_for_emotion)/ASR_SAMPLE_RATE:.1f}s 音频)"
         )
         logger.info(
             f"Session {session_id} | Transcript: {merged} "

@@ -126,12 +126,18 @@ class TTSService:
             synthesizer.streaming_complete()
 
             # 5. 从队列中获取所有生成的音频块
+            import time as _time
+            _t_tts = _time.monotonic()
+            _first = True
             while True:
                 item = q.get()
                 if item is None:  # 完成信号
                     break
                 if isinstance(item, Exception):
                     raise item
+                if _first:
+                    logger.info(f"⏱ TTS 首块 {(_time.monotonic()-_t_tts)*1000:.0f}ms")
+                    _first = False
                 yield item
                     
         except Exception as e:

@@ -1,6 +1,7 @@
 import asyncio
 import json
 import logging
+import time
 from typing import AsyncGenerator, Optional
 from datetime import datetime, timezone, timedelta
 from pathlib import Path
@@ -231,7 +232,7 @@ class LLMService:
             return ''
         recent = conversation[-(turns * 2):]
         lines = [
-            f"{'老人' if msg['role'] == 'user' else '心伴'}：{msg['content'][:60]}"
+            f"{'老人' if msg['role'] == 'user' else '蘅小年'}：{msg['content'][:60]}"
             for msg in recent
         ]
         return '\n'.join(lines)
@@ -429,6 +430,9 @@ class LLMService:
             self.sessions[session_id] = []
         conversation = self.sessions[session_id]
 
+        # 分段计时：一轮回复慢在哪一段，光靠感觉判断不出来
+        _t0 = time.monotonic()
+
         # ── 步骤 2：关键词危机检测（硬性熔断层，第一优先级，不依赖任何 LLM）────
         category = 'neutral'      # 默认值（危机被拦截、或路由失败兜底时使用）
         matched_signals = ''
@@ -453,6 +457,7 @@ class LLMService:
                 crisis_recent=crisis_vigilant,
                 strategy_feedback=strategy_feedback,
             )
+            logger.info(f"⏱ 路由({DEEPSEEK_MODEL}) {(time.monotonic()-_t0)*1000:.0f}ms")
             if category == 'crisis':
                 crisis = True
                 logger.warning(f"⚠️  危机信号触发 (路由 LLM) | Session: {session_id} | 文本: {user_text[:50]}")
@@ -548,9 +553,15 @@ class LLMService:
 
         # ── 步骤 9：流式处理输出 ─────────────────────────────────────────────
         full_reply = ''
+        _t_gen = time.monotonic()
         async for chunk in stream:
             delta_text = chunk.choices[0].delta.content or ''
             if delta_text:
+                if not full_reply:
+                    logger.info(
+                        f"⏱ 生成首字({QWEN_MODEL}) {(time.monotonic()-_t_gen)*1000:.0f}ms "
+                        f"| 本轮累计 {(time.monotonic()-_t0)*1000:.0f}ms"
+                    )
                 full_reply += delta_text
                 yield {
                     'type':   'delta',

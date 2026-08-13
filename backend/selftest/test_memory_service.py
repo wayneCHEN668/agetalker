@@ -175,7 +175,7 @@ def test_summary_input_excludes_assistant_turns():
     assert '菜市场' in text
     assert '萝卜' in text
     assert '老伴' not in text, "AI 的回复混进摘要输入了"
-    assert '心伴' not in text
+    assert '蘅小年' not in text
 
 
 def test_fact_red_line_examples_are_disclaimed():

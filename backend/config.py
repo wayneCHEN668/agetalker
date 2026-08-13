@@ -15,10 +15,30 @@ else:
 # ── General Configuration ─────────────────────────────────────────────────────
 DEVICE = 'cpu'
 
+# ── 本地模型缓存 ──────────────────────────────────────────────────────────────
+# MODELSCOPE_CACHE 在 .env 里是相对路径，改成绝对路径，避免"从哪个目录启动"
+# 决定模型下到哪里（从仓库根目录启动会认到空目录，然后重下一遍 3.9G）。
+_BACKEND_DIR = os.path.dirname(os.path.abspath(__file__))
+os.environ['MODELSCOPE_CACHE'] = os.path.abspath(
+    os.path.join(_BACKEND_DIR, os.getenv('MODELSCOPE_CACHE', './.model_cache'))
+)
+_MODEL_DIR = os.path.join(os.environ['MODELSCOPE_CACHE'], 'models', 'iic')
+
+
+def _local_or_hub(dirname: str, model_id: str) -> str:
+    """缓存目录存在就直接给 funasr 本地路径——它 os.path.exists() 命中后会跳过
+    整个 ModelScope 流程，启动不联网、断网也能起。目录不存在（新服务器首次部署）
+    则回落到模型 ID，照常自动下载到上面的缓存目录，下次启动即走本地。"""
+    path = os.path.join(_MODEL_DIR, dirname)
+    return path if os.path.isdir(path) else model_id
+
+
 # ── ASR Configuration (STEP 1) ────────────────────────────────────────────────
-ASR_MODEL = 'paraformer-zh'
-ASR_VAD_MODEL = 'fsmn-vad'
-ASR_PUNC_MODEL = 'ct-punc'
+ASR_MODEL = _local_or_hub(
+    'speech_seaco_paraformer_large_asr_nat-zh-cn-16k-common-vocab8404-pytorch', 'paraformer-zh'
+)
+ASR_VAD_MODEL = _local_or_hub('speech_fsmn_vad_zh-cn-16k-common-pytorch', 'fsmn-vad')
+ASR_PUNC_MODEL = _local_or_hub('punc_ct-transformer_cn-en-common-vocab471067-large', 'ct-punc')
 
 ASR_SAMPLE_RATE = 16000
 ASR_FRAME_SAMPLES = 2048        # ~128ms @ 16kHz (Preserved from original)
@@ -60,7 +80,7 @@ ASR_MERGE_WINDOW_MS = int(os.getenv('ASR_MERGE_WINDOW_MS', '1400'))
 ASR_CLOUD_HEARTBEAT = True   # 静音时持续发送心跳保持连接不断开
 
 # ── Emotion Configuration (STEP 2) ────────────────────────────────────────────
-EMOTION_MODEL = 'iic/emotion2vec_plus_large'
+EMOTION_MODEL = _local_or_hub('emotion2vec_plus_large', 'iic/emotion2vec_plus_large')
 EMOTION_CONF_THRESHOLD = 0.45   # Drop to neutral if below this
 EMOTION_MIN_DURATION_S = 0.5    # Skip if too short
 EMOTION_MAX_DURATION_S = 10.0   # Cap at 10s
@@ -129,7 +149,7 @@ DEEPSEEK_BASE_URL = os.getenv('DEEPSEEK_BASE_URL', 'https://api.deepseek.com')
 # （当前指向 deepseek-v4-flash 的非思考模式），直接用显式模型 ID，免得临到弃用日期前
 # 措手不及。deepseek-v4-flash 本身就是官方推荐用于路由/分类/抽取这类高频轻量任务的模型，
 # 跟我们这里的用途正好匹配。
-DEEPSEEK_MODEL    = os.getenv('DEEPSEEK_MODEL', 'deepseek-v4-pro')
+DEEPSEEK_MODEL    = os.getenv('DEEPSEEK_MODEL', 'deepseek-v4-flash')
 
 if DEEPSEEK_API_KEY:
     print(f"DEBUG: DEEPSEEK_API_KEY loaded (length: {len(DEEPSEEK_API_KEY)})")
