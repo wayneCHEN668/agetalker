@@ -349,11 +349,17 @@ export default function HomeScreen() {
 
       replyInFlightRef.current = true;
       const result = await fetchProactive(sessionIdRef.current, 'silence');
-      replyInFlightRef.current = false;
+      // 被作废（老人在等待期间又开口了）：discardOngoingReply() 已经接管了
+      // replyInFlightRef（先置 false 再为即将开始的真实回复置 true），这里
+      // 不能再碰它，否则会把真实回复刚设的 true 冲掉。也不重新计时——
+      // 是否要计时由真实回复流程自己决定。
+      if (result?.reason !== 'aborted') {
+        replyInFlightRef.current = false;
 
-      // 没说出实际内容（被护栏拦下 / 生成失败 / 被作废）：安静收场，
-      // 不重试、不提示老人，但要重新计时——过一会儿条件可能就满足了。
-      if (!result?.fullText) armSilenceTimer();
+        // 没说出实际内容（被护栏拦下 / 生成失败）：安静收场，
+        // 不重试、不提示老人，但要重新计时——过一会儿条件可能就满足了。
+        if (!result?.fullText) armSilenceTimer();
+      }
     }, SILENCE_PROMPT_MS);
   }, [isRecording, fetchProactive, clearSilenceTimer, ttsPlayingRef]);
 

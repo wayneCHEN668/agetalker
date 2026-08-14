@@ -133,3 +133,51 @@ async def test_proactive_reuses_question_throttle(svc):
 
     # 节流生效时，采集规划器应返回 MODE_NONE——不该顺带问称呼（或任何字段）。
     assert svc.profile.get_profile('e1')['slots']['address']['ask_count'] == 0
+
+
+@pytest.mark.asyncio
+async def test_proactive_silence_respects_sensitive_category(svc):
+    """沉默唤起必须用会话真实的 last_category，不能硬编码 'neutral'。
+
+    沉默唤起发生在对话中间——如果上一轮判定的类别是敏感类别（比如
+    grief），说明老人可能正处在一段敏感叙事的停顿里。安全窗口门槛
+    （category in ('neutral','positive')）必须挡住这种情况下的主动
+    起话头，否则沉默唤起会在敏感叙事中间插进一句不相关的采集提问。
+    """
+    svc.last_category['s1'] = 'grief'
+
+    with patch.object(svc.client.chat.completions, 'create',
+                      new_callable=AsyncMock) as api:
+        api.return_value = _stream(['外头天不错啊。我该怎么称呼您呀？'])
+        async for _ in svc.stream_proactive('s1', 'e1', 'silence'):
+            pass
+
+    # 敏感类别下，安全窗口门槛应挡住采集（包括称呼）。
+    assert svc.profile.get_profile('e1')['slots']['address']['ask_count'] == 0
+
+
+@pytest.mark.asyncio
+async def test_proactive_silence_respects_closing_phase(svc):
+    """沉默唤起必须用会话真实的 phase，不能硬编码 'opening'。
+
+    如果这次沉默发生在会话已经进入收尾阶段（聊了很久），安全窗口门槛
+    （phase != 'closing'）必须挡住主动起话头——这时候不该再开一个新的
+    采集话题。
+    """
+    from datetime import datetime, timedelta, timezone
+    from config import SESSION_CLOSING_AFTER_MIN
+
+    meta = svc._get_session_meta('s1')
+    meta['started_at'] = datetime.now(timezone.utc) - timedelta(
+        minutes=SESSION_CLOSING_AFTER_MIN + 1
+    )
+    assert svc.get_phase('s1') == 'closing'
+
+    with patch.object(svc.client.chat.completions, 'create',
+                      new_callable=AsyncMock) as api:
+        api.return_value = _stream(['外头天不错啊。我该怎么称呼您呀？'])
+        async for _ in svc.stream_proactive('s1', 'e1', 'silence'):
+            pass
+
+    # 收尾阶段下，安全窗口门槛应挡住采集（包括称呼）。
+    assert svc.profile.get_profile('e1')['slots']['address']['ask_count'] == 0

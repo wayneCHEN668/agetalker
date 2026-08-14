@@ -778,8 +778,8 @@ class LLMService:
                 plan = plan_elicitation(
                     self.profile.get_profile(elder_id),
                     slot_hint                  = '',
-                    category                   = 'neutral',
-                    phase                      = 'opening',
+                    category                   = self.last_category.get(session_id, 'neutral'),
+                    phase                      = self.get_phase(session_id),
                     crisis                     = False,
                     crisis_vigilant            = self._is_crisis_vigilant(session_id),
                     restrain_questions         = self._should_restrain_questions(session_id),
