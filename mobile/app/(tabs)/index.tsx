@@ -169,10 +169,10 @@ export default function HomeScreen() {
         if (noAnswerTimerRef.current) {
           clearTimeout(noAnswerTimerRef.current);
           noAnswerTimerRef.current = null;
-        }
-        if (!proactiveAnsweredRef.current) {
-          proactiveAnsweredRef.current = true;
-          reportProactiveOutcome(true);
+          if (!proactiveAnsweredRef.current) {
+            proactiveAnsweredRef.current = true;
+            reportProactiveOutcome(true);
+          }
         }
         // 老人又开口了：先把上一条还没说完的回复作废
         await discardOngoingReply();
