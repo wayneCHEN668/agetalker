@@ -261,7 +261,6 @@ export default function HomeScreen() {
       resetLLM();
       stopTTS();
       start(sessionId);
-      armSilenceTimer();
     }
   }, [isRecording, messages.length]);
 
@@ -336,11 +335,18 @@ export default function HomeScreen() {
       const result = await fetchProactive(sessionIdRef.current, 'silence');
       replyInFlightRef.current = false;
 
-      // 被护栏拦下或生成失败：安静收场，不重试、不提示老人。
-      // 但要重新计时——过一会儿条件可能就满足了。
-      if (result?.blocked) armSilenceTimer();
+      // 没说出实际内容（被护栏拦下 / 生成失败 / 被作废）：安静收场，
+      // 不重试、不提示老人，但要重新计时——过一会儿条件可能就满足了。
+      if (!result?.fullText) armSilenceTimer();
     }, SILENCE_PROMPT_MS);
   }, [isRecording, fetchProactive, clearSilenceTimer, ttsPlayingRef]);
+
+  // start(sessionId) 不会同步更新 isRecording（state 更新是异步的），紧跟着直接
+  // 调 armSilenceTimer 会读到还没更新的旧值、直接被守卫短路掉。改成响应式：
+  // isRecording 真正变成 true 的那次渲染才去 arm。
+  useEffect(() => {
+    if (isRecording) armSilenceTimer();
+  }, [isRecording, armSilenceTimer]);
 
   // 卸载时清掉沉默计时器
   useEffect(() => clearSilenceTimer, [clearSilenceTimer]);
