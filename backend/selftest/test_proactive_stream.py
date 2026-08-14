@@ -108,3 +108,28 @@ async def test_proactive_marks_address_asked(svc):
         async for _ in svc.stream_proactive('s1', 'e1', 'scheduled'):
             pass
     assert svc.profile.get_profile('e1')['slots']['address']['ask_count'] == 1
+
+
+@pytest.mark.asyncio
+async def test_proactive_reuses_question_throttle(svc):
+    """必须复用现有问句节流器 _should_restrain_questions()，不能另起一套计数。
+
+    沉默唤起（trigger='silence'）发生在对话中间：如果前几轮 AI 已经连续问了
+    好几个问题，节流器会判定「该收一收了」。这个状态必须被主动开口的采集
+    规划尊重——否则沉默唤起可以绕开节流器，在刚追问了一串问题之后又借着
+    采集问题接着问，正是节流器要防的事。
+    """
+    from config import MAX_CONSECUTIVE_QUESTIONS
+
+    meta = svc._get_session_meta('s1')
+    meta['consecutive_questions'] = MAX_CONSECUTIVE_QUESTIONS
+    assert svc._should_restrain_questions('s1') is True
+
+    with patch.object(svc.client.chat.completions, 'create',
+                      new_callable=AsyncMock) as api:
+        api.return_value = _stream(['外头天不错啊。'])
+        async for _ in svc.stream_proactive('s1', 'e1', 'silence'):
+            pass
+
+    # 节流生效时，采集规划器应返回 MODE_NONE——不该顺带问称呼（或任何字段）。
+    assert svc.profile.get_profile('e1')['slots']['address']['ask_count'] == 0

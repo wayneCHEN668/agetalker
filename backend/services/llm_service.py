@@ -768,7 +768,7 @@ class LLMService:
                     phase                      = 'opening',
                     crisis                     = False,
                     crisis_vigilant            = self._is_crisis_vigilant(session_id),
-                    restrain_questions         = False,
+                    restrain_questions         = self._should_restrain_questions(session_id),
                     turns_since_last_elicit    = meta['turn_count'] - meta['last_elicit_turn'],
                     elicited_this_session      = meta['elicited_count'],
                     address_asked_this_session = meta['address_asked'],
