@@ -2,7 +2,9 @@ import React, { useState, useCallback, useRef, useEffect } from 'react';
 import { StyleSheet, View, SafeAreaView, Text, TouchableOpacity } from 'react-native';
 import { Design } from '@/constants/Design';
 import { CATEGORY_ZH_MAP } from '@/constants/Category';
-import { newSessionId, SILENCE_PROMPT_MS } from '@/constants/Session';
+import {
+  newSessionId, SILENCE_PROMPT_MS, PROACTIVE_SCHEDULE, PROACTIVE_NO_ANSWER_MS,
+} from '@/constants/Session';
 import { StatusBar } from '@/components/StatusBar';
 import { TranscriptArea } from '@/components/TranscriptArea';
 import { Waveform } from '@/components/Waveform';
@@ -39,6 +41,11 @@ export default function HomeScreen() {
   const onPlaybackDoneRef = useRef<() => void>(() => {});
   // 沉默唤起计时器。老人开着对话但一直没说话时，AI 先开口。
   const silenceTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  // 今天已经触发过的时间点（小时）。防止同一个整点内反复触发。
+  const firedHoursRef = useRef<Set<string>>(new Set());
+  const noAnswerTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  // 主动招呼之后，老人有没有搭话
+  const proactiveAnsweredRef = useRef(false);
 
   // 1. TTS
   const {
@@ -158,6 +165,15 @@ export default function HomeScreen() {
     onTranscript: async (text, isFinal, emotion) => {
       if (isFinal) {
         clearSilenceTimer();
+        // 他搭话了：撤掉无人应答的收场计时
+        if (noAnswerTimerRef.current) {
+          clearTimeout(noAnswerTimerRef.current);
+          noAnswerTimerRef.current = null;
+        }
+        if (!proactiveAnsweredRef.current) {
+          proactiveAnsweredRef.current = true;
+          reportProactiveOutcome(true);
+        }
         // 老人又开口了：先把上一条还没说完的回复作废
         await discardOngoingReply();
 
@@ -350,6 +366,72 @@ export default function HomeScreen() {
 
   // 卸载时清掉沉默计时器
   useEffect(() => clearSilenceTimer, [clearSilenceTimer]);
+
+  /**
+   * 定时主动招呼。
+   *
+   * 每分钟查一次表，到点且当前没有进行中的对话就自动开一个会话、AI 先说话、
+   * 然后自动开麦。
+   *
+   * 错过不补发（设计文档 §9）：App 在后台或设备休眠时错过的时间点直接跳过，
+   * 否则回前台会一次性说三段话。firedHoursRef 用「日期+小时」做键，天然满足
+   * 这一点——过了那个小时就再也不会触发。
+   */
+  useEffect(() => {
+    const tick = async () => {
+      if (isRecording || isEndingRef.current) return;
+
+      const now = new Date();
+      const key = `${now.toDateString()}#${now.getHours()}`;
+      if (!PROACTIVE_SCHEDULE.includes(now.getHours())) return;
+      if (firedHoursRef.current.has(key)) return;
+      firedHoursRef.current.add(key);
+
+      const sessionId = newSessionId();
+      sessionIdRef.current = sessionId;
+      setMessages([]);
+      setCurrentEmotion('neutral');
+      setErrorMessage('');
+      proactiveAnsweredRef.current = false;
+
+      const result = await fetchProactive(sessionId, 'scheduled');
+      // 被护栏拦下（夜间静默/每日上限/连续无应答）：安静收场，什么都不做
+      if (result?.blocked || !result?.fullText) return;
+
+      // 说完了自动开麦，等他搭话
+      start(sessionId);
+      armNoAnswerTimer();
+    };
+
+    const id = setInterval(tick, 60_000);
+    tick();
+    return () => clearInterval(id);
+  }, [isRecording, fetchProactive, start]);
+
+  /**
+   * 无人应答收场。
+   *
+   * 定时招呼时老人很可能不在。等一个窗口没人搭话就安静停掉、上报服务端；
+   * 连续几次之后服务端当天不再主动开口——没有这条，设备会变成定时扰民的
+   * 喇叭，而且扰的是隔壁床的人。
+   */
+  const armNoAnswerTimer = useCallback(() => {
+    if (noAnswerTimerRef.current) clearTimeout(noAnswerTimerRef.current);
+    noAnswerTimerRef.current = setTimeout(() => {
+      noAnswerTimerRef.current = null;
+      if (proactiveAnsweredRef.current) return;
+      // 没人应答：停掉录音，安静收场，不再呼叫
+      stopASR();
+      clearSilenceTimer();
+      setMessages([]);
+      reportProactiveOutcome(false);
+    }, PROACTIVE_NO_ANSWER_MS);
+  }, [stopASR, clearSilenceTimer, reportProactiveOutcome]);
+
+  // 卸载时清掉无人应答收场计时器
+  useEffect(() => () => {
+    if (noAnswerTimerRef.current) clearTimeout(noAnswerTimerRef.current);
+  }, []);
 
   // 让 useTTS 的 onPlaybackDone 始终指向最新的 finishEndSession
   useEffect(() => {
