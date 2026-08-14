@@ -34,6 +34,7 @@ from prompts.templates import (
     build_normal_prompt,
     build_crisis_prompt,
     build_closing_prompt,
+    build_proactive_prompt,
     ROUTER_SYSTEM_PROMPT,
     build_router_user_prompt,
     resolve_strategy_id,
@@ -732,6 +733,114 @@ class LLMService:
             'type': 'done', 'full_text': full_reply, 'crisis': False,
             'category': 'closing', 'strategy_id': '', 'strategy_name': '道别',
             'tts_params': tts_params,
+        }
+
+    # ─── 主动开口 ───────────────────────────────────────────────────────────
+
+    async def stream_proactive(
+        self,
+        session_id: str = 'default',
+        elder_id:   str = 'default_elder',
+        trigger:    str = 'scheduled',
+    ) -> AsyncGenerator[dict, None]:
+        """AI 主动说一段话（定时招呼 / 沉默唤起）。
+
+        形状和 stream_closing 完全一致（meta → delta... → done），前端复用
+        同一条播放通路。
+
+        与 closing 的一个关键差别：**生成失败时不兜底说一句**。closing 失败
+        必须有兜底（不能把刚敞开心扉的人晾在那儿），proactive 失败必须没有
+        兜底——不能因为失败就反复出声（设计文档 §9）。
+        """
+        address  = self.profile.get_address(elder_id) if self.profile else '您'
+        memory   = self.memory.get_context(elder_id) if self.memory else ''
+        prof_ctx = self.profile.get_context(elder_id) if self.profile else ''
+
+        # 主动开口的时刻没有正在进行的叙事，是采集的最佳窗口（设计文档 §6.2）
+        meta = self._get_session_meta(session_id)
+        elicit_block, plan = '', None
+        if self.profile is not None:
+            try:
+                plan = plan_elicitation(
+                    self.profile.get_profile(elder_id),
+                    slot_hint                  = '',
+                    category                   = 'neutral',
+                    phase                      = 'opening',
+                    crisis                     = False,
+                    crisis_vigilant            = self._is_crisis_vigilant(session_id),
+                    restrain_questions         = False,
+                    turns_since_last_elicit    = meta['turn_count'] - meta['last_elicit_turn'],
+                    elicited_this_session      = meta['elicited_count'],
+                    address_asked_this_session = meta['address_asked'],
+                )
+                if plan.mode != MODE_NONE:
+                    elicit_block = build_elicitation_block(plan.mode, plan.slot, plan.is_stale)
+            except Exception as e:
+                logger.warning(f"主动开口采集规划失败（忽略）: {e}")
+                plan = None
+
+        system_prompt = build_proactive_prompt(
+            address, trigger,
+            memory_context    = memory,
+            profile_context   = prof_ctx,
+            elicitation_block = elicit_block,
+        )
+
+        # 主动开口一律用平缓语气，不跟着任何类别走
+        tts_params = CATEGORY_TTS_PARAMS_MAP['neutral']
+        yield {
+            'type': 'meta', 'crisis': False, 'category': 'proactive',
+            'strategy_id': '', 'strategy_name': '主动问候', 'tts_params': tts_params,
+        }
+
+        try:
+            stream = await self.client.chat.completions.create(
+                model       = QWEN_MODEL,
+                messages    = [
+                    {'role': 'system', 'content': system_prompt},
+                    {'role': 'user',   'content': '（现在轮到你先开口。）'},
+                ],
+                stream      = True,
+                max_tokens  = LLM_MAX_TOKENS,
+                temperature = LLM_TEMPERATURE,
+                top_p       = LLM_TOP_P,
+            )
+        except Exception as e:
+            # 静默放弃：不重试、不兜底说一句
+            logger.warning(f"主动开口生成失败，本次放弃 (Session: {session_id}): {e}")
+            yield {'type': 'done', 'full_text': '', 'crisis': False,
+                   'category': 'proactive', 'strategy_id': '',
+                   'strategy_name': '主动问候', 'tts_params': tts_params}
+            return
+
+        full_reply = ''
+        async for chunk in stream:
+            delta_text = chunk.choices[0].delta.content or ''
+            if delta_text:
+                full_reply += delta_text
+                yield {'type': 'delta', 'text': delta_text, 'crisis': False}
+
+        # 主动说的话必须进历史，否则老人回应时模型不知道自己刚说了什么
+        if full_reply:
+            self.sessions.setdefault(session_id, []).append(
+                {'role': 'assistant', 'content': full_reply}
+            )
+            self._note_reply_shape(session_id, full_reply)
+            if plan is not None and plan.mode != MODE_NONE and self.profile is not None:
+                try:
+                    self.profile.note_asked(elder_id, plan.slot)
+                    if plan.slot == 'address':
+                        meta['address_asked'] = True
+                    else:
+                        meta['elicited_count'] += 1
+                        meta['last_elicit_turn'] = meta['turn_count']
+                except Exception as e:
+                    logger.warning(f"主动开口采集计数推进失败（忽略）: {e}")
+
+        yield {
+            'type': 'done', 'full_text': full_reply, 'crisis': False,
+            'category': 'proactive', 'strategy_id': '',
+            'strategy_name': '主动问候', 'tts_params': tts_params,
         }
 
     # ─── 危机检测 ───────────────────────────────────────────────────────────
