@@ -71,6 +71,8 @@ export const useLLM = (options: UseLLMOptions = {}) => {
 
     // 逐句流水线的缓冲：pending 攒的是已经成句、但还没够长到值得发一次合成的文本
     let pending = '';
+    let blocked = false;
+    let blockReason = '';
     const emitChunk = (chunk: string) => {
       const trimmed = chunk.trim();
       if (trimmed) onSentence?.(trimmed, ttsParams, category);
@@ -139,6 +141,12 @@ export const useLLM = (options: UseLLMOptions = {}) => {
                 capturedStrategyName = data.strategy_name || capturedStrategyName;
                 setStrategyName(capturedStrategyName);
                 if (data.crisis) setIsCrisis(true);
+              } else if (data.type === 'blocked') {
+                // 服务端护栏拒绝了这次主动开口（夜间静默/每日上限/连续无应答/
+                // 危机警戒）。安静收场——不重试，也不要提示老人。
+                blocked = true;
+                blockReason = data.reason || 'unknown';
+                console.log('[useLLM] 主动开口被护栏拦下:', blockReason);
               } else if (data.type === 'error') {
                 console.error('LLM Service Error:', data.message);
                 const errText = `\n[系统错误: ${data.message}]`;
@@ -152,6 +160,11 @@ export const useLLM = (options: UseLLMOptions = {}) => {
         }
       }
 
+      if (blocked) {
+        setIsStreaming(false);
+        return { blocked: true, reason: blockReason, fullText: '' };
+      }
+
       // 收尾：把还没达到最小长度的尾巴补发出去（回复很短时，这里才是唯一一次合成）
       if (pending.trim()) {
         emitChunk(pending);
@@ -160,16 +173,22 @@ export const useLLM = (options: UseLLMOptions = {}) => {
 
       // 流完成回调（传递策略名称给前端气泡标签）
       onDone?.(capturedStrategyName);
+      return { blocked: false, reason: '', fullText };
     } catch (err) {
       // 主动作废（老人又开口了）不是错误，别弹"我走神了"那句
       if (controller.signal.aborted) {
         console.log('[useLLM] 回复已作废（老人继续说话）');
-        return;
+        return { blocked: false, reason: 'aborted', fullText: '' };
       }
       console.error('LLM Fetch Error:', err);
-      setResponse(fallbackText);
-      onDelta?.(fallbackText);
+      // fallbackText 为空串表示"这条链路失败时不许说话"（主动开口就是这样：
+      // 老人根本没开口，冒出一句"我刚才走神了"是荒谬的）
+      if (fallbackText) {
+        setResponse(fallbackText);
+        onDelta?.(fallbackText);
+      }
       onDone?.();
+      return { blocked: false, reason: 'error', fullText: '' };
     } finally {
       setIsStreaming(false);
       if (abortRef.current === controller) abortRef.current = null;
@@ -215,6 +234,43 @@ export const useLLM = (options: UseLLMOptions = {}) => {
   );
 
   /**
+   * AI 主动开口。trigger:
+   *   'scheduled' —— 到点了主动招呼（当前无进行中的会话）
+   *   'silence'   —— 对话中老人静默了一会儿，AI 先接上话
+   *
+   * 护栏在服务端。返回 blocked=true 时安静收场，**不要重试、不要提示老人**。
+   * 生成失败时也不说兜底文案——老人根本没开口，冒出一句「我刚才走神了」
+   * 是荒谬的（所以 fallbackText 传空串）。
+   */
+  const fetchProactive = useCallback(
+    (sessionId: string, trigger: 'scheduled' | 'silence') =>
+      runStream(
+        `${baseUrl}/llm/proactive?session_id=${encodeURIComponent(sessionId)}` +
+          `&elder_id=${encodeURIComponent(elderIdRef.current)}` +
+          `&trigger=${trigger}`,
+        { method: 'POST' },
+        '',
+      ),
+    [baseUrl, runStream],
+  );
+
+  /**
+   * 主动招呼之后老人到底有没有搭话。连续无应答达到阈值后，服务端当天不再
+   * 主动开口——没有这条，设备会变成定时扰民的喇叭。
+   */
+  const reportProactiveOutcome = useCallback(async (answered: boolean) => {
+    try {
+      await fetch(
+        `${baseUrl}/llm/proactive/outcome?elder_id=${encodeURIComponent(elderIdRef.current)}` +
+          `&answered=${answered}`,
+        { method: 'POST' },
+      );
+    } catch (err) {
+      console.warn('[useLLM] 上报主动开口结果失败:', err);
+    }
+  }, [baseUrl]);
+
+  /**
    * 重置本地流式状态；传入 sessionId 时，同时通知后端释放该会话的服务端状态
    * （对话历史 / 策略延续 / 类别延续）。
    *
@@ -242,7 +298,7 @@ export const useLLM = (options: UseLLMOptions = {}) => {
   }, [baseUrl]);
 
   return {
-    response, fetchReply, fetchClosing, abort,
-    isStreaming, reset, strategyName, isCrisis,
+    response, fetchReply, fetchClosing, fetchProactive, reportProactiveOutcome,
+    abort, isStreaming, reset, strategyName, isCrisis,
   };
 };
