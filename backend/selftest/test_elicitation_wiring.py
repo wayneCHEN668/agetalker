@@ -1,4 +1,6 @@
 """采集指令怎么进到 prompt 里，以及会话级计数器怎么推进。"""
+import asyncio
+import json
 import pytest
 from unittest.mock import AsyncMock, MagicMock, patch
 
@@ -127,3 +129,30 @@ async def test_service_works_without_profile_service():
                 mock_create.return_value = _stream(['嗯。'])
                 events = [e async for e in svc.stream_reply('你好', EMOTION, 's3', 'e3')]
     assert any(e['type'] == 'done' for e in events)
+
+
+@pytest.mark.asyncio
+async def test_profile_extraction_runs_without_memory_service(svc):
+    """回归测试：svc fixture 本来就没配 memory_service（self.memory is None）。
+
+    _schedule_memory_work() 曾经在函数最开头 `if self.memory is None: return`，
+    这会连带把画像抽取也一起挡住——即便画像和记忆是两个独立、解耦的后台调用。
+    这里要证明：memory 没启用，画像抽取依然真的跑了。
+    """
+    assert svc.memory is None
+    with patch.object(svc, '_route_category', new_callable=AsyncMock) as mock_route:
+        mock_route.return_value = ('neutral', '', 'natural_followup', '')
+        with patch.object(svc.client.chat.completions, 'create',
+                          new_callable=AsyncMock) as mock_create:
+            mock_create.return_value = _stream(['好啊。'])
+            with patch.object(svc.profile.client.chat.completions, 'create',
+                              new_callable=AsyncMock) as profile_api:
+                profile_api.return_value = MagicMock(choices=[MagicMock(
+                    message=MagicMock(content=json.dumps(
+                        {'hometown': '河北保定'}, ensure_ascii=False)))])
+                async for _ in svc.stream_reply('我老家保定的', EMOTION, 's4', 'e4'):
+                    pass
+                while svc._bg_tasks:
+                    await asyncio.gather(*list(svc._bg_tasks), return_exceptions=True)
+
+    assert svc.profile.get_profile('e4')['slots']['hometown']['value'] == '河北保定'

@@ -371,6 +371,11 @@ class LLMService:
         crisis: bool,
     ):
         """安排本轮的记忆后台工作：事实抽取 + （必要时）滚动摘要压缩。"""
+        # 画像抽取：和记忆抽取并行的独立后台调用，不受 self.memory 是否启用影响
+        # ——两个服务解耦，各自可独立失败/独立开关。都在后台，不占关键路径。
+        if self.profile is not None and not crisis and user_text.strip():
+            self._spawn_bg(self.profile.observe_turn(elder_id, user_text))
+
         if self.memory is None:
             return
 
@@ -379,11 +384,6 @@ class LLMService:
         # 内容沉淀成跨会话的永久记录，以后也不会被回指出来。
         if not crisis:
             self._spawn_bg(self.memory.observe_turn(elder_id, user_text))
-
-        # 画像抽取：和记忆抽取并行的独立后台调用。两个服务解耦，各自可独立失败。
-        # 都在后台，不占关键路径——本轮回复的延迟完全不受影响。
-        if self.profile is not None and not crisis and user_text.strip():
-            self._spawn_bg(self.profile.observe_turn(elder_id, user_text))
 
         if dropped:
             pending = self._pending_summary.setdefault(session_id, [])
