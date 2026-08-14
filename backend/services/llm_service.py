@@ -62,6 +62,16 @@ def _grade_effect(delta: float) -> str:
     return '持平'
 
 
+# 耳背时在类别语速基础上再放慢的比例，以及绝对下限。
+# 下限存在的理由：再慢也得像正常说话——慢过头会变得诡异，反而更难听懂。
+_HEARING_SLOWDOWN = 0.85
+_MIN_SPEECH_SPEED = 0.70
+
+# 判定"耳背"的关键词。画像里存的是老人自己的说法，不是枚举值，
+# 所以这里用包含匹配而不是等值比较。
+_HARD_OF_HEARING_HINTS = ('耳背', '听不清', '大声', '聋', '听力不好', '耳朵背')
+
+
 class LLMService:
     """
     通义千问 LLM 心理回复服务（v4：策略在多轮间延续）。
@@ -573,7 +583,7 @@ class LLMService:
             'category':      category if not crisis else 'crisis',
             'strategy_id':   strategy_id,
             'strategy_name': strategy_name,
-            'tts_params':    self._get_tts_params_by_category(category, crisis),
+            'tts_params':    self._get_tts_params_by_category(category, crisis, elder_id),
         }
 
         # ── 步骤 5：追加用户消息到历史 ──────────────────────────────────────
@@ -673,7 +683,7 @@ class LLMService:
             'category':      category if not crisis else 'crisis',
             'strategy_id':   strategy_id,
             'strategy_name': strategy_name,
-            'tts_params':    self._get_tts_params_by_category(category, crisis),
+            'tts_params':    self._get_tts_params_by_category(category, crisis, elder_id),
         }
 
     # ─── 收束仪式 ───────────────────────────────────────────────────────────
@@ -943,11 +953,30 @@ class LLMService:
         label = emotion.get('label', 'neutral')
         return TTS_PARAMS_MAP.get(label, TTS_PARAMS_MAP['neutral'])
 
-    def _get_tts_params_by_category(self, category: str, crisis: bool) -> dict:
-        """根据路由模型判定的心理类别返回 TTS 参数（语义驱动）。"""
-        if crisis:
-            return CATEGORY_TTS_PARAMS_MAP['crisis']
-        return CATEGORY_TTS_PARAMS_MAP.get(category, CATEGORY_TTS_PARAMS_MAP['neutral'])
+    def _get_tts_params_by_category(
+        self, category: str, crisis: bool, elder_id: str = '',
+    ) -> dict:
+        """按心理类别取 TTS 参数，并按听力状况做一次放慢。
+
+        这是画像里唯一能反向改变系统行为的字段（设计文档 §3.4）：其他字段
+        只让 AI 会说话，这个字段让 App 变得能用。
+        """
+        key = 'crisis' if crisis else (category or 'neutral')
+        params = dict(CATEGORY_TTS_PARAMS_MAP.get(
+            key, CATEGORY_TTS_PARAMS_MAP['neutral']))
+
+        if not elder_id or self.profile is None:
+            return params
+        try:
+            slot = self.profile.get_profile(elder_id)['slots']['sensory_hearing']
+            if slot['status'] in ('filled', 'stale') and any(
+                hint in slot['value'] for hint in _HARD_OF_HEARING_HINTS
+            ):
+                params['speed'] = max(
+                    _MIN_SPEECH_SPEED, round(params['speed'] * _HEARING_SLOWDOWN, 2))
+        except Exception as e:
+            logger.warning(f"听力参数调整失败（用默认语速）: {e}")
+        return params
 
     # ─── 会话管理 ────────────────────────────────────────────────────────────
 
