@@ -514,6 +514,9 @@ class LLMService:
 
         # ── 步骤 3.6：采集规划（纯逻辑，不调 LLM）─────────────────────────────
         meta = self._get_session_meta(session_id)
+        # 记下本轮开始时的值——_note_reply_shape() 稍后会用本轮回复更新这个
+        # 计数器，届时它反映的就是"这一轮"而不是"上一轮"了，必须提前存好。
+        ai_asked_question_prev_turn = meta['consecutive_questions'] > 0
         elicit_block = ''
         plan = None
         if self.profile is not None:
@@ -641,6 +644,18 @@ class LLMService:
                     meta['last_elicit_turn'] = meta['turn_count']
             except Exception as e:
                 logger.warning(f"采集计数推进失败（忽略）: {e}")
+
+        # ── 步骤 10.6：行为观测（同步、纯计数，不调 LLM）─────────────────────
+        if self.profile is not None and not crisis:
+            try:
+                # ai_asked_question 用的是**上一轮**回复是否以问句结尾——
+                # 老人这一句正是对那一句的回应
+                self.profile.observe_behavior(
+                    elder_id, user_text, category,
+                    ai_asked_question=ai_asked_question_prev_turn,
+                )
+            except Exception as e:
+                logger.warning(f"行为观测失败（忽略）: {e}")
 
         # ── 步骤 10.5：安排记忆的后台工作（不阻塞本轮回复）────────────────────
         self._schedule_memory_work(elder_id, session_id, user_text, dropped, crisis)

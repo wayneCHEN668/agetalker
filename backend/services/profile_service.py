@@ -27,6 +27,7 @@ from openai import AsyncOpenAI
 from config import (
     ELICIT_MAX_ASK_COUNT, PROFILE_DIR,
     DEEPSEEK_API_KEY, DEEPSEEK_BASE_URL, DEEPSEEK_MODEL, ROUTER_EXTRA_BODY,
+    OBSERVE_MIN_TURNS, OBSERVE_MIN_TURNS_EMOTION,
 )
 from services.profile_schema import (
     SLOTS, ASKABLE_SLOTS, OBSERVABLE_SLOTS,
@@ -377,6 +378,81 @@ class ProfileService:
         """把内存里的画像落盘。"""
         if elder_id in self._profiles:
             self._save(elder_id, self._profiles[elder_id])
+
+    # ─── 观察类字段（永远不问，从对话行为统计）────────────────────────────
+
+    def observe_behavior(
+        self,
+        elder_id: str,
+        user_text: str,
+        category: str,
+        ai_asked_question: bool,
+    ) -> None:
+        """累计一轮的行为观测，够样本了就下结论。
+
+        样本不足时宁可留空（设计文档 §3.2）——错误的性格判断会一直影响后续
+        所有对话的语气，比"暂时不知道"糟糕得多。
+
+        同步方法：只做计数和阈值判断，不调 LLM、不做 IO 密集操作。
+        """
+        if not user_text.strip():
+            return
+        profile = self.get_profile(elder_id)
+        obs = profile.setdefault('observations', {})
+
+        obs['turns'] = obs.get('turns', 0) + 1
+        obs['chars'] = obs.get('chars', 0) + len(user_text.strip())
+        if ai_asked_question:
+            obs['after_q_turns'] = obs.get('after_q_turns', 0) + 1
+            obs['after_q_chars'] = obs.get('after_q_chars', 0) + len(user_text.strip())
+        else:
+            obs['free_turns'] = obs.get('free_turns', 0) + 1
+            obs['free_chars'] = obs.get('free_chars', 0) + len(user_text.strip())
+        cats = obs.setdefault('categories', {})
+        cats[category] = cats.get(category, 0) + 1
+
+        self._settle_observations(profile, obs)
+        self._save(elder_id, profile)
+
+    @staticmethod
+    def _settle_observations(profile: dict, obs: dict) -> None:
+        turns = obs.get('turns', 0)
+
+        # ── 话多话少 ──
+        if turns >= OBSERVE_MIN_TURNS:
+            avg = obs['chars'] / turns
+            verdict = '话少，答得短，别追着问' if avg < 10 else (
+                '话多，愿意讲，给他讲完的空间' if avg > 40 else '不多不少')
+            mark_filled(profile, 'talkativeness', verdict,
+                        source='observed', confidence='low')
+
+        # ── 喜欢被问还是自己讲 ──
+        aq, fq = obs.get('after_q_turns', 0), obs.get('free_turns', 0)
+        if aq >= OBSERVE_MIN_TURNS and fq >= OBSERVE_MIN_TURNS:
+            after_q_avg = obs['after_q_chars'] / aq
+            free_avg    = obs['free_chars'] / fq
+            if free_avg > after_q_avg * 1.5:
+                verdict = '喜欢自己讲，少问多听'
+            elif after_q_avg > free_avg * 1.5:
+                verdict = '喜欢被问着聊，可以多起话头'
+            else:
+                verdict = '都行'
+            mark_filled(profile, 'interaction_preference', verdict,
+                        source='observed', confidence='low')
+
+        # ── 情绪底色 ──
+        # 全程 neutral 说明没有明显底色，不该硬扣一顶帽子。
+        if turns >= OBSERVE_MIN_TURNS_EMOTION:
+            cats = {k: v for k, v in obs.get('categories', {}).items()
+                    if k not in ('neutral', 'crisis')}
+            if cats:
+                top, count = max(cats.items(), key=lambda kv: kv[1])
+                if count / turns >= 0.3:
+                    zh = {'depression': '偏抑郁', 'anxiety': '偏焦虑',
+                          'anger': '容易上火', 'loneliness': '常觉得孤单',
+                          'grief': '心里存着哀伤', 'positive': '心态挺开朗'}.get(top, top)
+                    mark_filled(profile, 'emotional_baseline', zh,
+                                source='observed', confidence='low')
 
     # ─── 抽取（后台异步）───────────────────────────────────────────────────
 
