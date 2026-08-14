@@ -43,6 +43,7 @@ from prompts.templates import (
 )
 from services.profile_schema import is_askable
 from services.elicitation import MODE_NONE, plan_elicitation
+from services.proactive import ProactiveGuard
 
 logger = logging.getLogger(__name__)
 
@@ -126,6 +127,9 @@ class LLMService:
         self.crisis_vigilance: dict[str, int] = {}
         # 会话弧线状态：{session_id: {started_at, turn_count, consecutive_questions}}
         self.session_meta: dict[str, dict] = {}
+        # 主动开口护栏（夜间静默 / 每日上限 / 无人应答）。放在服务端而不是前端：
+        # 前端可以被绕过、可以有 bug、可以在多个标签页里各跑一份计时器。
+        self.proactive_guard = ProactiveGuard()
         logger.info("LLM 服务初始化完成 ✅ (生成: Qwen/AsyncOpenAI | 路由: DeepSeek/AsyncOpenAI | 策略延续: 已启用 | 类别延续: 已启用 | 危机警惕期: 已启用)")
 
     # ─── 路由 LLM ───────────────────────────────────────────────────────────
@@ -842,6 +846,18 @@ class LLMService:
             'category': 'proactive', 'strategy_id': '',
             'strategy_name': '主动问候', 'tts_params': tts_params,
         }
+
+    def can_speak_proactively(self, session_id: str, elder_id: str) -> tuple[bool, str]:
+        """这一刻能不能主动开口。返回 (可以吗, 不可以的原因)。"""
+        return self.proactive_guard.can_speak(
+            elder_id, crisis_vigilant=self._is_crisis_vigilant(session_id),
+        )
+
+    def note_proactive_answered(self, elder_id: str) -> None:
+        self.proactive_guard.note_answered(elder_id)
+
+    def note_proactive_no_answer(self, elder_id: str) -> None:
+        self.proactive_guard.note_no_answer(elder_id)
 
     # ─── 危机检测 ───────────────────────────────────────────────────────────
 

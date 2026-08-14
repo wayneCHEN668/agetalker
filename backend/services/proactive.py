@@ -55,6 +55,19 @@ class ProactiveGuard:
             self._state[elder_id] = st
         return st
 
+    def _ensure_entry(self, elder_id: str, now: datetime) -> dict:
+        """惰性创建 elder 的状态，已存在则直接复用——不做跨日归零。
+
+        与 _today() 的区别：_today() 是「读当天配额」的入口，跨天要归零；
+        这里只负责保证字典存在，用于记录应答/无应答事件本身不该因为日期
+        比对而把刚记的连续无应答次数冲掉。
+        """
+        st = self._state.get(elder_id)
+        if st is None:
+            st = {'date': now.date().isoformat(), 'count': 0, 'no_answer_streak': 0}
+            self._state[elder_id] = st
+        return st
+
     def can_speak(
         self,
         elder_id: str,
@@ -81,15 +94,14 @@ class ProactiveGuard:
         now = now or datetime.now(_BEIJING)
         self._today(elder_id, now)['count'] += 1
 
-    def note_answered(self, elder_id: str) -> None:
+    def note_answered(self, elder_id: str, now: datetime | None = None) -> None:
         """老人应答了，连续无应答清零。"""
-        st = self._state.get(elder_id)
-        if st:
-            st['no_answer_streak'] = 0
+        now = now or datetime.now(_BEIJING)
+        self._ensure_entry(elder_id, now)['no_answer_streak'] = 0
 
-    def note_no_answer(self, elder_id: str) -> None:
-        st = self._state.get(elder_id)
-        if st:
-            st['no_answer_streak'] += 1
-            if st['no_answer_streak'] >= PROACTIVE_NO_ANSWER_GIVEUP:
-                logger.info(f"连续 {st['no_answer_streak']} 次无人应答，今天不再主动开口 | elder={elder_id}")
+    def note_no_answer(self, elder_id: str, now: datetime | None = None) -> None:
+        now = now or datetime.now(_BEIJING)
+        st = self._ensure_entry(elder_id, now)
+        st['no_answer_streak'] += 1
+        if st['no_answer_streak'] >= PROACTIVE_NO_ANSWER_GIVEUP:
+            logger.info(f"连续 {st['no_answer_streak']} 次无人应答，今天不再主动开口 | elder={elder_id}")
