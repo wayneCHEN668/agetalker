@@ -55,8 +55,34 @@ export function useMemoryGame(deckSize: DeckSizeKey) {
     setFlipped([]);
   }, [deckSize]);
 
-  // Task 4 填充
-  const flip = useCallback((_key: string) => {}, []);
+  const flip = useCallback(
+    (key: string) => {
+      if (flipped.includes(key)) return;
+
+      const card = cards.find((c) => c.key === key);
+      // 已配对的牌永久正面朝上，再点它没有任何意义
+      if (!card || card.matched) return;
+
+      const next = [...flipped, key];
+      setFlipped(next);
+      if (next.length < 2) return;
+
+      const [aKey, bKey] = next;
+      const a = cards.find((c) => c.key === aKey);
+      const b = cards.find((c) => c.key === bKey);
+      if (!a || !b) return;
+
+      if (a.faceId === b.faceId) {
+        setCards((cs) =>
+          cs.map((c) => (c.key === aKey || c.key === bKey ? { ...c, matched: true } : c)),
+        );
+        // 清空 flipped：这两张牌之后靠 matched 保持正面朝上
+        setFlipped([]);
+      }
+      // 不匹配的分支在 Task 5 补（停留 MISMATCH_HOLD_MS 后翻回）
+    },
+    [cards, flipped],
+  );
 
   return { cards, status, isFlipped, flip, restart };
 }
