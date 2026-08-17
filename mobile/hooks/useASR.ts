@@ -1,6 +1,7 @@
 import { useState, useCallback, useRef, useEffect } from 'react';
 import { Platform } from 'react-native';
 import { BARGE_IN } from '../constants/BargeIn';
+import { TTS_UNMUTE_DELAY_MS } from '../constants/TTS';
 
 interface UseASROptions {
   onTranscript?: (text: string, isFinal: boolean, emotion?: any) => void;
@@ -285,7 +286,7 @@ export const useASR = ({ onTranscript, onStatusChange, onError, onBargeIn, wsUrl
         isTTSMutedRef.current = false;
         unmuteTimeoutRef.current = null;
         console.log('[useASR] Unmuted (200ms Delay Passed)');
-      }, 200);
+      }, TTS_UNMUTE_DELAY_MS);
     };
 
     window.addEventListener('tts-start', handleTTSStart);
