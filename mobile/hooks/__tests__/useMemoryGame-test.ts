@@ -1,6 +1,6 @@
 import { act, renderHook } from '@testing-library/react-native';
 import { useMemoryGame, type Card } from '@/hooks/useMemoryGame';
-import { DECK_SIZES, type DeckSizeKey } from '@/constants/MemoryGame';
+import { DECK_SIZES, MISMATCH_HOLD_MS, type DeckSizeKey } from '@/constants/MemoryGame';
 
 const ALL_SIZES: DeckSizeKey[] = ['few', 'normal', 'many'];
 
@@ -151,5 +151,108 @@ describe('完成态', () => {
     expect(result.current.cards.every((c) => !c.matched)).toBe(true);
     expect(result.current.status).toBe('playing');
     expect(result.current.cards).toHaveLength(DECK_SIZES.few.cardCount);
+  });
+});
+
+describe('错配后停留再翻回', () => {
+  beforeEach(() => jest.useFakeTimers());
+  afterEach(() => jest.useRealTimers());
+
+  test(`翻错后两张牌先留在正面（不足 ${MISMATCH_HOLD_MS}ms）`, () => {
+    const { result } = renderHook(() => useMemoryGame('normal'));
+    const [a, b] = findMismatch(result.current.cards);
+    act(() => result.current.flip(a.key));
+    act(() => result.current.flip(b.key));
+
+    // 老人反应慢，翻回太快他还没看清第二张就没了，这一轮信息等于白给
+    act(() => { jest.advanceTimersByTime(MISMATCH_HOLD_MS - 100); });
+    expect(result.current.isFlipped(a.key)).toBe(true);
+    expect(result.current.isFlipped(b.key)).toBe(true);
+  });
+
+  test(`满 ${MISMATCH_HOLD_MS}ms 后两张一起翻回背面`, () => {
+    const { result } = renderHook(() => useMemoryGame('normal'));
+    const [a, b] = findMismatch(result.current.cards);
+    act(() => result.current.flip(a.key));
+    act(() => result.current.flip(b.key));
+
+    act(() => { jest.advanceTimersByTime(MISMATCH_HOLD_MS); });
+    expect(result.current.isFlipped(a.key)).toBe(false);
+    expect(result.current.isFlipped(b.key)).toBe(false);
+  });
+
+  test('翻错不产生任何 matched（没有"错误"惩罚，也没有奖励）', () => {
+    const { result } = renderHook(() => useMemoryGame('normal'));
+    const [a, b] = findMismatch(result.current.cards);
+    act(() => result.current.flip(a.key));
+    act(() => result.current.flip(b.key));
+    act(() => { jest.advanceTimersByTime(MISMATCH_HOLD_MS); });
+
+    expect(result.current.cards.every((c) => !c.matched)).toBe(true);
+  });
+});
+
+describe('判定期锁定', () => {
+  beforeEach(() => jest.useFakeTimers());
+  afterEach(() => jest.useRealTimers());
+
+  test('停留窗口内的第三次点击被忽略', () => {
+    // 手抖连点：不锁的话第三张牌会覆盖 flipped，状态机错乱
+    const { result } = renderHook(() => useMemoryGame('normal'));
+    const [a, b] = findMismatch(result.current.cards);
+    act(() => result.current.flip(a.key));
+    act(() => result.current.flip(b.key));
+
+    const third = result.current.cards.find((c) => c.key !== a.key && c.key !== b.key);
+    if (!third) throw new Error('测试前提被破坏：牌堆不足三张');
+    act(() => result.current.flip(third.key));
+    expect(result.current.isFlipped(third.key)).toBe(false);
+  });
+
+  test('停留结束后又能正常翻牌', () => {
+    const { result } = renderHook(() => useMemoryGame('normal'));
+    const [a, b] = findMismatch(result.current.cards);
+    act(() => result.current.flip(a.key));
+    act(() => result.current.flip(b.key));
+    act(() => { jest.advanceTimersByTime(MISMATCH_HOLD_MS); });
+
+    const third = result.current.cards.find((c) => c.key !== a.key && c.key !== b.key);
+    if (!third) throw new Error('测试前提被破坏：牌堆不足三张');
+    act(() => result.current.flip(third.key));
+    expect(result.current.isFlipped(third.key)).toBe(true);
+  });
+});
+
+describe('换档位', () => {
+  test('换档位后牌数变为新档位、重新洗牌、配对状态清空', () => {
+    const { result, rerender } = renderHook(
+      ({ size }: { size: DeckSizeKey }) => useMemoryGame(size),
+      { initialProps: { size: 'few' as DeckSizeKey } },
+    );
+
+    const [a, b] = findPair(result.current.cards);
+    act(() => result.current.flip(a.key));
+    act(() => result.current.flip(b.key));
+    expect(result.current.cards.some((c) => c.matched)).toBe(true);
+
+    rerender({ size: 'many' as DeckSizeKey });
+
+    expect(result.current.cards).toHaveLength(DECK_SIZES.many.cardCount);
+    expect(result.current.cards.every((c) => !c.matched)).toBe(true);
+    expect(result.current.status).toBe('playing');
+  });
+
+  test('档位没变时不重新发牌（不会把玩到一半的局洗掉）', () => {
+    const { result, rerender } = renderHook(
+      ({ size }: { size: DeckSizeKey }) => useMemoryGame(size),
+      { initialProps: { size: 'normal' as DeckSizeKey } },
+    );
+
+    const [a, b] = findPair(result.current.cards);
+    act(() => result.current.flip(a.key));
+    act(() => result.current.flip(b.key));
+
+    rerender({ size: 'normal' as DeckSizeKey });
+    expect(result.current.cards.some((c) => c.matched)).toBe(true);
   });
 });

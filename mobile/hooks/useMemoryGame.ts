@@ -1,6 +1,11 @@
-import { useCallback, useMemo, useState } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 
-import { CARD_FACES, DECK_SIZES, type DeckSizeKey } from '@/constants/MemoryGame';
+import {
+  CARD_FACES,
+  DECK_SIZES,
+  MISMATCH_HOLD_MS,
+  type DeckSizeKey,
+} from '@/constants/MemoryGame';
 
 export type Card = {
   /** 这张牌的唯一标识。同一图案的两张牌 key 不同。 */
@@ -35,6 +40,37 @@ export function buildDeck(deckSize: DeckSizeKey): Card[] {
 export function useMemoryGame(deckSize: DeckSizeKey) {
   const [cards, setCards] = useState<Card[]>(() => buildDeck(deckSize));
   const [flipped, setFlipped] = useState<string[]>([]);
+  /** 错配停留期。这期间忽略一切点击，否则手抖连点会让第三张牌覆盖 flipped。 */
+  const [locked, setLocked] = useState(false);
+  const holdTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
+
+  const clearHoldTimer = useCallback(() => {
+    if (holdTimer.current !== null) {
+      clearTimeout(holdTimer.current);
+      holdTimer.current = null;
+    }
+  }, []);
+
+  const restart = useCallback(() => {
+    clearHoldTimer();
+    setCards(buildDeck(deckSize));
+    setFlipped([]);
+    setLocked(false);
+  }, [clearHoldTimer, deckSize]);
+
+  // 换档位 = 用新牌数重开一局。跳过首次运行，否则会把 useState 初始化时
+  // 发的那副牌立刻丢掉重发一次（多一次无谓渲染）。
+  const isFirstRun = useRef(true);
+  useEffect(() => {
+    if (isFirstRun.current) {
+      isFirstRun.current = false;
+      return;
+    }
+    restart();
+  }, [deckSize, restart]);
+
+  // 卸载时清掉挂起的定时器，避免在已销毁的组件上 setState
+  useEffect(() => clearHoldTimer, [clearHoldTimer]);
 
   const status: GameStatus =
     cards.length > 0 && cards.every((c) => c.matched) ? 'complete' : 'playing';
@@ -50,13 +86,9 @@ export function useMemoryGame(deckSize: DeckSizeKey) {
     [flipped, matchedKeys],
   );
 
-  const restart = useCallback(() => {
-    setCards(buildDeck(deckSize));
-    setFlipped([]);
-  }, [deckSize]);
-
   const flip = useCallback(
     (key: string) => {
+      if (locked) return;
       if (flipped.includes(key)) return;
 
       const card = cards.find((c) => c.key === key);
@@ -78,10 +110,18 @@ export function useMemoryGame(deckSize: DeckSizeKey) {
         );
         // 清空 flipped：这两张牌之后靠 matched 保持正面朝上
         setFlipped([]);
+        return;
       }
-      // 不匹配的分支在 Task 5 补（停留 MISMATCH_HOLD_MS 后翻回）
+
+      // 翻错了。没有任何惩罚，只是让他把第二张牌看清楚再翻回去。
+      setLocked(true);
+      holdTimer.current = setTimeout(() => {
+        setFlipped([]);
+        setLocked(false);
+        holdTimer.current = null;
+      }, MISMATCH_HOLD_MS);
     },
-    [cards, flipped],
+    [cards, flipped, locked],
   );
 
   return { cards, status, isFlipped, flip, restart };
