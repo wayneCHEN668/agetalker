@@ -35,3 +35,4 @@ backend/data/memory/
 .playwright-mcp/
 .codegraph/
 .pytest_cache/
+.worktrees/
