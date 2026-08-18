@@ -482,7 +482,7 @@ class LLMService:
         crisis_vigilant = self._is_crisis_vigilant(session_id)
         if crisis:
             logger.warning(f"⚠️  危机信号触发 (关键词) | Session: {session_id} | 文本: {user_text[:50]}")
-            self._dispatch_crisis_event(user_text, session_id)
+            self._dispatch_crisis_event(user_text, session_id, elder_id)
 
         # ── 步骤 3：路由模型判断心理类别 + 选策略（仅在关键词层未命中时才需要）──
         if not crisis:
@@ -500,7 +500,7 @@ class LLMService:
             if category == 'crisis':
                 crisis = True
                 logger.warning(f"⚠️  危机信号触发 (路由 LLM) | Session: {session_id} | 文本: {user_text[:50]}")
-                self._dispatch_crisis_event(user_text, session_id)
+                self._dispatch_crisis_event(user_text, session_id, elder_id)
                 matched_signals = ''
                 strategy_id = ''
             else:
@@ -557,7 +557,13 @@ class LLMService:
 
         # ── 步骤 4：构建 System Prompt ──────────────────────────────────────
         if crisis:
-            system_prompt = build_crisis_prompt()
+            # 危机轮同样要拿到画像和紧急联系人。少了它们，prompt 里"找个人来陪
+            # 你"这一步就没有任何事实可依，模型只会编一个人出来——这一轮恰恰是
+            # 最不能编的一轮。
+            system_prompt = build_crisis_prompt(
+                profile_context   = self.profile.get_context(elder_id) if self.profile else '',
+                emergency_contact = self.profile.get_emergency_contact(elder_id) if self.profile else '',
+            )
         else:
             system_prompt = build_normal_prompt(
                 category, emotion, matched_signals, strategy_id, crisis_vigilant,
@@ -898,11 +904,17 @@ class LLMService:
         if remaining > 0:
             self.crisis_vigilance[session_id] = remaining - 1
 
-    def _dispatch_crisis_event(self, user_text: str, session_id: str):
-        """自动检测到危机信号时分发事件。"""
+    def _dispatch_crisis_event(self, user_text: str, session_id: str, elder_id: str = ''):
+        """自动检测到危机信号时分发事件。
+
+        elder_id 必须带上：告警的用处是管理端据此通知人去联系老人，只有
+        session_id 的话对面拿到的是一个查不到人的会话号。AI 自己在对话里
+        不知道联系人时不许编（见 build_crisis_prompt），兜底就落在这条告警上。
+        """
         self._write_event({
             'type':       'crisis_alert',
             'session_id': session_id,
+            'elder_id':   elder_id,
             'user_text':  user_text[:100],
         })
 

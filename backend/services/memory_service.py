@@ -94,6 +94,15 @@ EXTRACT_SYSTEM_PROMPT = """\
 }
 
 这句话里没有值得记的事实时，三个数组都留空。这是很常见的情况，不要硬凑。
+
+## 不许写相对时间
+note / summary / content 里**绝对不许出现**「今天」「昨天」「刚才」「最近」
+「前几天」「这几天」这类词。这些条目会被长期存着、以后每天读一遍——今天写下的
+「今天」，一个月后读还是「今天」，那件事就永远停在刚刚发生。
+- 不好：「老人今天才知道小华去世了」
+- 好：「老人刚得知小华去世」（说事，不带时间）
+非要记时间点不可，就写老人自己说的那个绝对说法（「走了三年了」「上个月」是他
+说的，可以留）；你自己不许添加任何时间词。
 """
 
 
@@ -194,12 +203,40 @@ def merge_facts(ledger: dict, facts: dict) -> dict:
     return ledger
 
 
+# 每条台账都带着 last_mentioned，但渲染时一直没往外给，于是模型看到的是一堆
+# 没有时间的事实，全都塌在此刻。最扎眼的一条实盘数据：
+#
+#     小华 [已故]：…老人今天才知道小华去世了      last_mentioned: 2026-08-11
+#
+# 这条 note 的**文本里**写着「今天」——8 月 11 日写下的。模型每天读到的都是
+# 「今天」，小华于是连着六天都是今天死的。所以补日期前缀只是一半，另一半是
+# 下面这句兑冲说明：得直接告诉模型条目里的「今天」指的是方括号里那天。少了它，
+# 模型不会自己去做这个换算（旧条目已经写死，改不动了，只能靠这句兜）。
+_DATE_HINT = (
+    '（〔〕里是记下这条的日期。条目内容里要是出现「今天」「刚才」「最近」，'
+    '指的是记下它的那一天，不是现在。）'
+)
+
+
+def _date_tag(item: dict, today: datetime) -> str:
+    """〔8月11日〕。跨年的条目补上年份，否则去年的八月会读成今年的八月。"""
+    raw = item.get('last_mentioned') or ''
+    try:
+        when = datetime.fromisoformat(raw)
+    except ValueError:
+        return ''
+    if when.year != today.year:
+        return f'〔{when.year}年{when.month}月{when.day}日〕'
+    return f'〔{when.month}月{when.day}日〕'
+
+
 def render_ledger(ledger: dict) -> str:
     """把台账渲染成注入 system prompt 的文本。空台账返回空串。"""
     if not ledger:
         return ''
 
     lines: list[str] = []
+    today = datetime.now(_BEIJING)
 
     people = ledger.get('people') or []
     if people:
@@ -213,24 +250,26 @@ def render_ledger(ledger: dict) -> str:
             line = ''.join(bits)
             if p.get('notes'):
                 line += '：' + '；'.join(p['notes'])
-            lines.append(f'- {line}')
+            lines.append(f'- {_date_tag(p, today)}{line}')
 
     events = ledger.get('events') or []
     if events:
         lines.append('【他说过的事】')
-        lines.extend(f"- {e['summary']}" for e in events)
+        lines.extend(f"- {_date_tag(e, today)}{e['summary']}" for e in events)
 
     prefs = ledger.get('preferences') or []
     if prefs:
         lines.append('【他的喜好习惯】')
-        lines.extend(f"- {p['content']}" for p in prefs)
+        lines.extend(f"- {_date_tag(p, today)}{p['content']}" for p in prefs)
 
     past = ledger.get('session_summaries') or []
     if past:
         lines.append('【以前聊过的】')
         lines.extend(f"- {s['date'][:10]}：{s['text']}" for s in past)
 
-    return '\n'.join(lines)
+    if not lines:
+        return ''
+    return _DATE_HINT + '\n' + '\n'.join(lines)
 
 
 # ─── 服务 ────────────────────────────────────────────────────────────────────

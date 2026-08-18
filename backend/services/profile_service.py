@@ -199,6 +199,41 @@ def render_address(profile: dict) -> str:
     return DEFAULT_ADDRESS
 
 
+def render_emergency_contact(profile: dict) -> str:
+    """危机轮能说出口的那个人。没录过就返回空串。
+
+    没有 DEFAULT_ADDRESS 那样的兜底——称呼拿不准还能叫「您」，联系人拿不准
+    没有任何东西可以顶上。空串在 prompt 那边会翻译成「反过来问他身边有谁」，
+    这正是唯一安全的处理方式。
+
+    这个字段是 EXTERNAL 类型，不在 render_profile() 渲染范围内（那里只渲染
+    问出来的和观察出来的），所以危机路径要单独读一次。
+    """
+    slot = profile.get('slots', {}).get('emergency_contact')
+    if slot and slot['status'] == STATUS_FILLED and slot['value'].strip():
+        return slot['value'].strip()
+    return ''
+
+
+def _year_from_age_or_year(text: str, now: Optional[datetime] = None):
+    """「我自己」那一页的岁数输入：四位年份和岁数都收，一律换算成年份。
+
+    这一栏对老人显示的是「岁数」，他会输 83；但存进去的必须是出生年份
+    （存年龄一年后就是错的，见 set_birth_year）。两个区间不重叠，没有歧义。
+    都不像就原样返回，让 set_birth_year 去拒。
+    """
+    try:
+        n = int(str(text).strip())
+    except (TypeError, ValueError):
+        return text
+    this_year = (now or _now()).year
+    if 1900 <= n <= this_year:
+        return n                      # 已经是年份
+    if 40 <= n <= 120:
+        return this_year - n          # 是岁数
+    return text
+
+
 def set_birth_year(
     profile: dict,
     raw_value,
@@ -366,6 +401,10 @@ class ProfileService:
         """该怎么称呼他。拿不准一律「您」。"""
         return render_address(self.get_profile(elder_id))
 
+    def get_emergency_contact(self, elder_id: str) -> str:
+        """危机轮能说出口的那个人。没录过返回空串，调用方据此改成反问。"""
+        return render_emergency_contact(self.get_profile(elder_id))
+
     # ─── 写入 ───────────────────────────────────────────────────────────
 
     def note_asked(self, elder_id: str, slot_name: str) -> None:
@@ -378,6 +417,61 @@ class ProfileService:
         """把内存里的画像落盘。"""
         if elder_id in self._profiles:
             self._save(elder_id, self._profiles[elder_id])
+
+    # ─── 「我自己」那一页：老人自己看、自己改 ────────────────────────────
+    # 只开放 askable。external（紧急联系人/药名/房间号）是护理员录的；
+    # observable（话多话少/情绪底色）是从对话行为统计出来的，手改下一轮
+    # 就被 observe_behavior 盖掉，给个能改的入口只会让人白改一次。
+
+    def list_editable_slots(self, elder_id: str) -> list[dict]:
+        """页面要显示的那一列，按优先级排。没采到的 value 是空串。"""
+        profile = self.get_profile(elder_id)
+        return [
+            {
+                'name':   name,
+                'zh':     slot_zh(name),
+                'value':  profile['slots'][name]['value'],
+                'status': profile['slots'][name]['status'],
+            }
+            for name in askable_by_priority()
+        ]
+
+    def set_slot_manually(self, elder_id: str, slot_name: str, value: str) -> bool:
+        """手工改一个字段。空值表示清掉。成功返回 True。
+
+        清空是必须有的：实盘画像里 address 的值是「我」——从 AI 自己那句
+        「我该怎么称呼你呀？」里抽错的。改不掉错值的编辑页没有意义。
+        清空后回到 unknown，AI 以后会重新问。
+        """
+        if not is_askable(slot_name):
+            return False
+
+        profile = self.get_profile(elder_id)
+        text = str(value).strip()
+
+        if not text:
+            slot = profile['slots'][slot_name]
+            slot.update({
+                'value': '', 'status': STATUS_UNKNOWN, 'last_filled': '',
+                # evidence/source 一起清掉：留着旧依据，下一次抽取会拿它当
+                # 上下文，等于没清干净
+                'source': '', 'confidence': '', 'evidence': '',
+            })
+            self._save(elder_id, profile)
+            return True
+
+        if slot_name == 'birth_year':
+            # 这一栏对老人显示的是「岁数」，他会输 83；schema 只存四位年份
+            # （存年龄一年后就是错的，见 set_birth_year）。转换放在这儿，
+            # schema 不动。
+            ok = set_birth_year(profile, _year_from_age_or_year(text), source='manual')
+            if not ok:
+                return False
+        else:
+            mark_filled(profile, slot_name, text, source='manual', confidence='high')
+
+        self._save(elder_id, profile)
+        return True
 
     # ─── 观察类字段（永远不问，从对话行为统计）────────────────────────────
 

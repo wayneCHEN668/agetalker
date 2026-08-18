@@ -7,9 +7,11 @@ import {
   PROACTIVE_PLAYBACK_WAIT_MAX_MS,
 } from '@/constants/Session';
 import { TTS_UNMUTE_DELAY_MS } from '@/constants/TTS';
+import { getViewMode, setViewMode as persistViewMode, DEFAULT_VIEW_MODE, ViewMode } from '@/constants/ViewMode';
 import { StatusBar } from '@/components/StatusBar';
 import { TranscriptArea } from '@/components/TranscriptArea';
 import { Waveform } from '@/components/Waveform';
+import { OrbVisualizer, derivePhase } from '@/components/OrbVisualizer';
 import { ActionButton } from '@/components/ActionButton';
 import { ErrorToast } from '@/components/ErrorToast';
 import { ConfirmDialog } from '@/components/ConfirmDialog';
@@ -25,6 +27,8 @@ export default function HomeScreen() {
   const [errorMessage, setErrorMessage] = useState('');
   const [showEndDialog, setShowEndDialog] = useState(false);
   const [isLLMStreaming, setIsLLMStreaming] = useState(false);
+  // 抽象可视化 / 对话窗口。默认抽象，首帧先按默认值渲染，读存储回来前不会闪一下再变
+  const [viewMode, setViewModeState] = useState<ViewMode>(DEFAULT_VIEW_MODE);
 
   // 跟踪流式 AI 消息在 messages 中的索引
   const streamingIndexRef = useRef<number | null>(null);
@@ -55,7 +59,7 @@ export default function HomeScreen() {
   // 1. TTS
   const {
     speak, stop: stopTTS, stopForBargeIn, getSpokenText, resetSpokenText,
-    isPlayingRef: ttsPlayingRef,
+    isPlaying: ttsIsPlaying, isPlayingRef: ttsPlayingRef,
   } = useTTS({
     onPlaybackDone: () => onPlaybackDoneRef.current(),
   });
@@ -380,6 +384,23 @@ export default function HomeScreen() {
   // 卸载时清掉沉默计时器
   useEffect(() => clearSilenceTimer, [clearSilenceTimer]);
 
+  // 读取上次记住的展示模式（异步存储，读回来之前先按默认值渲染）
+  useEffect(() => {
+    let cancelled = false;
+    getViewMode().then((mode) => {
+      if (!cancelled) setViewModeState(mode);
+    });
+    return () => { cancelled = true; };
+  }, []);
+
+  const toggleViewMode = useCallback(() => {
+    setViewModeState((prev) => {
+      const next: ViewMode = prev === 'orb' ? 'chat' : 'orb';
+      persistViewMode(next);
+      return next;
+    });
+  }, []);
+
   /**
    * 等主动招呼的语音真正放完，再多等一下让 useASR 恢复收音。
    *
@@ -529,6 +550,14 @@ export default function HomeScreen() {
     : Design.colors.aura[currentEmotion as keyof typeof Design.colors.aura] ||
       Design.colors.aura.neutral;
 
+  // 抽象可视化的四态：speaking > thinking > listening > idle（TTS 播放时
+  // ASR 只是被静音，status 仍可能是 'listening'，说话态必须压过听态）
+  const orbPhase = derivePhase({
+    isPlaying: ttsIsPlaying,
+    isLLMStreaming,
+    asrStatus: status,
+  });
+
   const callCaregiver = useCallback(async () => {
     try {
       await fetch(
@@ -548,15 +577,35 @@ export default function HomeScreen() {
 
   return (
     <SafeAreaView style={[styles.container, { backgroundColor: auraColors[0] }]}>
-      <StatusBar status={status} />
-
-      <View style={styles.transcriptWrapper}>
-        <TranscriptArea messages={displayMessages} currentEmotion={currentEmotion} />
+      <View style={styles.headerRow}>
+        <StatusBar status={status} />
+        <TouchableOpacity
+          style={styles.viewModeToggle}
+          onPress={toggleViewMode}
+          accessibilityRole="button"
+          accessibilityLabel={viewMode === 'orb' ? '切换到对话文字' : '切换到抽象圆点'}
+        >
+          <Text style={styles.viewModeToggleText}>
+            {viewMode === 'orb' ? '看文字' : '看圆'}
+          </Text>
+        </TouchableOpacity>
       </View>
 
-      <View style={styles.visualizerContainer}>
-        <Waveform isActive={status === 'listening'} analyser={analyser} />
-      </View>
+      {viewMode === 'chat' ? (
+        <>
+          <View style={styles.transcriptWrapper}>
+            <TranscriptArea messages={displayMessages} currentEmotion={currentEmotion} />
+          </View>
+
+          <View style={styles.visualizerContainer}>
+            <Waveform isActive={status === 'listening'} analyser={analyser} />
+          </View>
+        </>
+      ) : (
+        <View style={styles.orbWrapper}>
+          <OrbVisualizer phase={orbPhase} analyser={analyser} auraColors={auraColors} />
+        </View>
+      )}
 
       {isCrisis && (
         <TouchableOpacity
@@ -602,6 +651,29 @@ const styles = StyleSheet.create({
   container: {
     flex: 1,
   },
+  headerRow: {
+    position: 'relative',
+  },
+  viewModeToggle: {
+    position: 'absolute',
+    right: 16,
+    top: 8,
+    minWidth: 44,
+    minHeight: 44,
+    paddingHorizontal: 14,
+    justifyContent: 'center',
+    alignItems: 'center',
+    borderRadius: 20,
+    backgroundColor: Design.colors.surface,
+    borderWidth: 1,
+    borderColor: Design.colors.outline,
+  },
+  viewModeToggleText: {
+    fontFamily: Design.typography.fontFamily,
+    fontSize: 14,
+    fontWeight: '600',
+    color: Design.colors.text.secondary,
+  },
   transcriptWrapper: {
     flex: 1,
     minHeight: 0,
@@ -610,6 +682,10 @@ const styles = StyleSheet.create({
     height: 100,
     justifyContent: 'center',
     alignItems: 'center',
+  },
+  orbWrapper: {
+    flex: 1,
+    minHeight: 0,
   },
   caregiverButton: {
     alignSelf: 'center',

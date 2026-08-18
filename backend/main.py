@@ -12,6 +12,7 @@ from config import MEMORY_ENABLED
 import routers.ws_asr as ws_asr_router
 import routers.sse_llm as sse_llm_router
 import routers.stream_tts as stream_tts_router
+import routers.profile as profile_router
 from dotenv import load_dotenv
 
 load_dotenv()
@@ -46,6 +47,7 @@ async def lifespan(app: FastAPI):
     
     sse_llm_router.llm_service = llm_svc
     stream_tts_router.tts_service = tts_svc
+    profile_router.profile_service = profile_svc
     
     # 3. Warm up models (only local backends need it)
     logger.info("Warming up models...")
@@ -80,6 +82,7 @@ app.add_middleware(
 app.include_router(ws_asr_router.router)
 app.include_router(sse_llm_router.router)
 app.include_router(stream_tts_router.router)
+app.include_router(profile_router.router)
 
 @app.get("/health")
 async def health_check():

@@ -63,6 +63,11 @@ ASR_CLOUD_LANGUAGE_HINTS = ['zh']
 # 「这一轮说完了没有」由下面的合并窗口判断。切得早反而有好处：中间结果能更快
 # 显示给老人看。
 ASR_CLOUD_MAX_SENTENCE_SILENCE = int(os.getenv('ASR_CLOUD_MAX_SENTENCE_SILENCE', '1000'))
+# 云端会话连续重建多少次仍然失败，就判定云端不可用、降级到本地 FunASR。
+# 收到任一转写结果即视为云端恢复正常，计数清零。
+# 设 3 是因为：真正的网络抖动一两次内必然重连成功；连挂三次说明是我们这边
+# 分类没覆盖到的永久性故障，继续重试只会变成刷屏死循环。
+ASR_CLOUD_MAX_RECONNECT = int(os.getenv('ASR_CLOUD_MAX_RECONNECT', '3'))
 
 # ── 整句合并窗口 ─────────────────────────────────────────────────────────────
 # 云端给出一个 final 之后，先不急着交给 LLM，再等这么久：期间只要老人又开口
