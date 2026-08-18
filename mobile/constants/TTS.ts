@@ -19,3 +19,11 @@ export const TTS_CONFIG = {
   BIT_DEPTH: 16,
   BASE_URL: 'http://localhost:8050',
 };
+
+/**
+ * TTS 放完之后，麦克风还要静音多久才恢复收音（毫秒）——等房间混响散掉。
+ *
+ * 放在这里而不是写死在 useASR 里：主动招呼那条路径要等这段时间过完才能开麦，
+ * 两边必须用同一个值，各写一个字面量迟早会对不上。
+ */
+export const TTS_UNMUTE_DELAY_MS = 200;

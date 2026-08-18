@@ -40,8 +40,14 @@ export const useLLM = (options: UseLLMOptions = {}) => {
     onDone,
   } = options;
 
-  // elder_id 跨会话稳定，读一次即可
-  const elderIdRef = useRef<string>(getElderId());
+  // elder_id 跨会话稳定，读一次即可。getElderId() 现在是异步的（原生端走
+  // AsyncStorage），用惰性 ref 缓存这个 Promise 本身，而不是缓存 resolve 后的
+  // 值——这样不管调用方多早发起第一个请求，都能等到同一次读取结果，不会在
+  // AsyncStorage 还没返回时就把空值/默认值发出去。
+  const elderIdPromiseRef = useRef<Promise<string> | null>(null);
+  if (elderIdPromiseRef.current === null) {
+    elderIdPromiseRef.current = getElderId();
+  }
   // 当前这条流的中止句柄。老人在回复生成到一半又开口时，这条回复要就地作废，
   // 否则会出现两条回复（第二条常常还跟第一条重复）。
   const abortRef = useRef<AbortController | null>(null);
@@ -203,17 +209,19 @@ export const useLLM = (options: UseLLMOptions = {}) => {
 
   /** 普通一轮对话。 */
   const fetchReply = useCallback(
-    (text: string, emotion: any, sessionId: string) =>
-      runStream(`${baseUrl}/llm/stream`, {
+    async (text: string, emotion: any, sessionId: string) => {
+      const elderId = await elderIdPromiseRef.current!;
+      return runStream(`${baseUrl}/llm/stream`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
           text,
           emotion: emotion || { label: 'neutral' },
           session_id: sessionId,
-          elder_id: elderIdRef.current,
+          elder_id: elderId,
         }),
-      }),
+      });
+    },
     [baseUrl, runStream],
   );
 
@@ -223,13 +231,15 @@ export const useLLM = (options: UseLLMOptions = {}) => {
    * 而这段回顾正是靠那份摘要生成的。
    */
   const fetchClosing = useCallback(
-    (sessionId: string) =>
-      runStream(
+    async (sessionId: string) => {
+      const elderId = await elderIdPromiseRef.current!;
+      return runStream(
         `${baseUrl}/llm/closing?session_id=${encodeURIComponent(sessionId)}` +
-          `&elder_id=${encodeURIComponent(elderIdRef.current)}`,
+          `&elder_id=${encodeURIComponent(elderId)}`,
         { method: 'POST' },
         '今天跟你聊得挺好的。你早点歇着，明儿这个点我还在这儿。',
-      ),
+      );
+    },
     [baseUrl, runStream],
   );
 
@@ -243,14 +253,16 @@ export const useLLM = (options: UseLLMOptions = {}) => {
    * 是荒谬的（所以 fallbackText 传空串）。
    */
   const fetchProactive = useCallback(
-    (sessionId: string, trigger: 'scheduled' | 'silence') =>
-      runStream(
+    async (sessionId: string, trigger: 'scheduled' | 'silence') => {
+      const elderId = await elderIdPromiseRef.current!;
+      return runStream(
         `${baseUrl}/llm/proactive?session_id=${encodeURIComponent(sessionId)}` +
-          `&elder_id=${encodeURIComponent(elderIdRef.current)}` +
+          `&elder_id=${encodeURIComponent(elderId)}` +
           `&trigger=${trigger}`,
         { method: 'POST' },
         '',
-      ),
+      );
+    },
     [baseUrl, runStream],
   );
 
@@ -260,8 +272,9 @@ export const useLLM = (options: UseLLMOptions = {}) => {
    */
   const reportProactiveOutcome = useCallback(async (answered: boolean) => {
     try {
+      const elderId = await elderIdPromiseRef.current!;
       await fetch(
-        `${baseUrl}/llm/proactive/outcome?elder_id=${encodeURIComponent(elderIdRef.current)}` +
+        `${baseUrl}/llm/proactive/outcome?elder_id=${encodeURIComponent(elderId)}` +
           `&answered=${answered}`,
         { method: 'POST' },
       );
@@ -287,9 +300,10 @@ export const useLLM = (options: UseLLMOptions = {}) => {
     try {
       // 带上 elder_id：后端据此把这次对话的摘要留档进长程台账，
       // 下次才能回指「上次咱们聊到…」
+      const elderId = await elderIdPromiseRef.current!;
       await fetch(
         `${baseUrl}/llm/reset?session_id=${encodeURIComponent(sessionId)}` +
-          `&elder_id=${encodeURIComponent(elderIdRef.current)}`,
+          `&elder_id=${encodeURIComponent(elderId)}`,
         { method: 'POST' },
       );
     } catch (err) {
