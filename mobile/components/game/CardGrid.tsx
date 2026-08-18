@@ -24,7 +24,7 @@ export default function CardGrid({ cards, columns, isFlipped, onFlip }: Props) {
   const { width } = useWindowDimensions();
 
   const size = useMemo(() => {
-    const available = Math.min(width, MAX_GRID_WIDTH) - Design.layout.spacing * 2;
+    const available = Math.min(width, MAX_GRID_WIDTH) - Design.layout.innerPadding * 2;
     const raw = Math.floor((available - GAP * (columns - 1)) / columns);
     return Math.max(CARD_MIN_SIZE, raw);
   }, [width, columns]);
