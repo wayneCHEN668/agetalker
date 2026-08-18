@@ -99,7 +99,7 @@ async def test_history_cropping(llm_service):
 
     # Mock 路由 LLM（避免真实 API 调用）
     with patch.object(llm_service, '_route_category', new_callable=AsyncMock) as mock_route:
-        mock_route.return_value = ('neutral', 'test routing', '')  # v5: 三元组 (category, matched_signals, strategy_id)
+        mock_route.return_value = ('neutral', 'test routing', '', '')  # (category, matched_signals, strategy_id, slot_hint)
         # Mock 流式 API 调用
         with patch.object(llm_service.client.chat.completions, 'create', new_callable=AsyncMock) as mock_create:
             # 构造一个空的流式响应
@@ -151,7 +151,7 @@ async def test_crisis_skips_routing(llm_service):
         # 这里以前写的是二元组，只因为该 mock 根本不会被调用才侥幸没炸——
         # 一旦哪天危机拦截失效，这个测试会以 unpack 报错而不是断言失败的形式
         # 挂掉，掩盖真正的问题。
-        mock_route.return_value = ('neutral', '', '')
+        mock_route.return_value = ('neutral', '', '', '')
         with patch.object(llm_service.client.chat.completions, 'create', new_callable=AsyncMock) as mock_create:
             mock_create.return_value = AsyncMock()
             mock_create.return_value.__aiter__.return_value = []
@@ -182,7 +182,7 @@ async def test_meta_event_precedes_deltas(llm_service):
     done 里给，前端就只能等整段生成结束再出声，每轮多出好几秒静默。
     """
     with patch.object(llm_service, '_route_category', new_callable=AsyncMock) as mock_route:
-        mock_route.return_value = ('grief', '哀伤信号', 'externalize')
+        mock_route.return_value = ('grief', '哀伤信号', 'externalize', '')
         with patch.object(llm_service.client.chat.completions, 'create',
                           new_callable=AsyncMock) as mock_create:
             mock_create.return_value = _make_stream(['我在', '听着呢。'])
@@ -217,7 +217,7 @@ async def test_crisis_vigilance_persists_then_decays(llm_service):
     sid = 's_vigil'
 
     with patch.object(llm_service, '_route_category', new_callable=AsyncMock) as mock_route:
-        mock_route.return_value = ('neutral', '', 'natural_followup')
+        mock_route.return_value = ('neutral', '', 'natural_followup', '')
         with patch.object(llm_service.client.chat.completions, 'create',
                           new_callable=AsyncMock) as mock_create:
             # 第 1 轮：命中危机关键词
@@ -288,7 +288,7 @@ async def test_memory_is_injected_into_system_prompt(llm_with_memory):
     """
     svc = llm_with_memory
     with patch.object(svc, '_route_category', new_callable=AsyncMock) as mock_route:
-        mock_route.return_value = ('grief', '哀伤信号', 'externalize')
+        mock_route.return_value = ('grief', '哀伤信号', 'externalize', '')
         with patch.object(svc.client.chat.completions, 'create',
                           new_callable=AsyncMock) as mock_create:
             mock_create.return_value = _make_stream(['嗯。'])
@@ -313,7 +313,7 @@ async def test_normal_turn_feeds_memory_but_crisis_turn_does_not(llm_with_memory
     """
     svc = llm_with_memory
     with patch.object(svc, '_route_category', new_callable=AsyncMock) as mock_route:
-        mock_route.return_value = ('neutral', '', 'natural_followup')
+        mock_route.return_value = ('neutral', '', 'natural_followup', '')
         with patch.object(svc.client.chat.completions, 'create',
                           new_callable=AsyncMock) as mock_create:
             mock_create.return_value = _make_stream(['嗯。'])
@@ -346,7 +346,7 @@ async def test_dropped_history_is_folded_into_summary(llm_with_memory):
         svc.sessions[sid].append({'role': 'assistant', 'content': f'回复{i}'})
 
     with patch.object(svc, '_route_category', new_callable=AsyncMock) as mock_route:
-        mock_route.return_value = ('neutral', '', 'natural_followup')
+        mock_route.return_value = ('neutral', '', 'natural_followup', '')
         with patch.object(svc.client.chat.completions, 'create',
                           new_callable=AsyncMock) as mock_create:
             mock_create.return_value = _make_stream(['嗯。'])
@@ -369,7 +369,7 @@ async def test_strategy_effect_feedback_reaches_router(llm_service):
     """
     sid = 's_effect'
     with patch.object(llm_service, '_route_category', new_callable=AsyncMock) as mock_route:
-        mock_route.return_value = ('anger', '愤怒信号', 'pause_breathe')
+        mock_route.return_value = ('anger', '愤怒信号', 'pause_breathe', '')
         with patch.object(llm_service.client.chat.completions, 'create',
                           new_callable=AsyncMock) as mock_create:
             # 第 1 轮：valence 很低（生气）
@@ -459,6 +459,74 @@ async def test_closing_falls_back_when_generation_fails(llm_with_memory):
     assert any(c['type'] == 'delta' for c in chunks)
 
 
+def test_truncate_last_reply_keeps_only_what_was_heard(llm_service):
+    """
+    被打断时，历史里那条回复要截断成实际播出去的部分。
+
+    不截断的话模型以为整段说完了，下一轮可能出现「我刚才跟你说的那个……」，
+    而老人根本没听到后半截。
+    """
+    sid = 's_trunc'
+    llm_service.sessions[sid] = [
+        {'role': 'user', 'content': '我今天有点累'},
+        {'role': 'assistant', 'content': '嗯，听得出来。今天是不是没歇好？要不咱们说说？'},
+    ]
+
+    changed = llm_service.truncate_last_reply(sid, '嗯，听得出来。')
+    assert changed is True
+    assert llm_service.sessions[sid][-1]['content'] == '嗯，听得出来。'
+    assert len(llm_service.sessions[sid]) == 2   # 用户那条不动
+
+
+def test_truncate_removes_reply_when_nothing_was_heard(llm_service):
+    """一个字都没播出去就被打断 → 整条回复从历史里移除。"""
+    sid = 's_trunc2'
+    llm_service.sessions[sid] = [
+        {'role': 'user', 'content': '我今天有点累'},
+        {'role': 'assistant', 'content': '嗯，听得出来。'},
+    ]
+    assert llm_service.truncate_last_reply(sid, '') is True
+    assert len(llm_service.sessions[sid]) == 1
+    assert llm_service.sessions[sid][-1]['role'] == 'user'
+
+
+def test_truncate_is_noop_when_fully_spoken_or_nothing_to_cut(llm_service):
+    """全部播完、或历史里最后一条不是回复时，不该乱改。"""
+    sid = 's_trunc3'
+    full = '嗯，听得出来。'
+    llm_service.sessions[sid] = [
+        {'role': 'user', 'content': '我今天有点累'},
+        {'role': 'assistant', 'content': full},
+    ]
+    assert llm_service.truncate_last_reply(sid, full) is False
+    assert llm_service.sessions[sid][-1]['content'] == full
+
+    # 最后一条是用户消息（回复还没生成）
+    llm_service.sessions[sid].pop()
+    assert llm_service.truncate_last_reply(sid, '随便什么') is False
+    # 会话根本不存在
+    assert llm_service.truncate_last_reply('不存在的会话', '啥') is False
+
+
+def test_truncate_resets_question_streak_when_question_cut_off(llm_service):
+    """
+    以问句结尾的回复被截断掉问句部分后，连续提问计数要跟着清零。
+
+    否则明明那个问题老人没听到，系统却记着"已经连问三轮了"，
+    接下来该问的时候反而不问了。
+    """
+    sid = 's_trunc4'
+    llm_service.sessions[sid] = [
+        {'role': 'user', 'content': '还行'},
+        {'role': 'assistant', 'content': '嗯。今天过得咋样？'},
+    ]
+    llm_service._note_reply_shape(sid, '嗯。今天过得咋样？')
+    assert llm_service._get_session_meta(sid)['consecutive_questions'] == 1
+
+    llm_service.truncate_last_reply(sid, '嗯。')
+    assert llm_service._get_session_meta(sid)['consecutive_questions'] == 0
+
+
 def test_category_tts_params(llm_service):
     """验证心理类别 → TTS 参数映射（语义驱动）。"""
     # 哀伤/抑郁 → 最缓
@@ -473,3 +541,69 @@ def test_category_tts_params(llm_service):
     assert llm_service._get_tts_params_by_category('neutral', True)['speed'] == 0.82
     # 未知类别 → 降级 neutral
     assert llm_service._get_tts_params_by_category('unknown', False)['speed'] == 1.00
+
+
+# ─── 路由 slot_hint（画像采集线索）────────────────────────────────────────────
+
+@pytest.mark.asyncio
+async def test_route_parses_slot_hint(llm_service):
+    """路由在同一次调用里顺带报出采集线索，不新增网络往返。"""
+    payload = ('{"category":"neutral","is_crisis":false,"matched_signals":"日常",'
+               '"strategy_id":"natural_followup","slot_hint":"sleep"}')
+    with patch.object(llm_service.router_client.chat.completions, 'create',
+                      new_callable=AsyncMock) as mock_api:
+        mock_api.return_value = MagicMock(
+            choices=[MagicMock(message=MagicMock(content=payload))]
+        )
+        category, signals, strategy_id, slot_hint = await llm_service._route_category('昨晚没睡好')
+    assert category == 'neutral'
+    assert slot_hint == 'sleep'
+
+
+@pytest.mark.asyncio
+async def test_route_drops_invalid_slot_hint(llm_service):
+    """设计文档 §4.1：非法字段名一律当空，宁可不采。"""
+    payload = ('{"category":"neutral","is_crisis":false,"matched_signals":"",'
+               '"strategy_id":"natural_followup","slot_hint":"favorite_color"}')
+    with patch.object(llm_service.router_client.chat.completions, 'create',
+                      new_callable=AsyncMock) as mock_api:
+        mock_api.return_value = MagicMock(
+            choices=[MagicMock(message=MagicMock(content=payload))]
+        )
+        _, _, _, slot_hint = await llm_service._route_category('随便说说')
+    assert slot_hint == ''
+
+
+@pytest.mark.asyncio
+async def test_route_missing_slot_hint_is_empty(llm_service):
+    """老版本 prompt 或模型漏字段时不能 KeyError。"""
+    payload = ('{"category":"neutral","is_crisis":false,"matched_signals":"",'
+               '"strategy_id":"natural_followup"}')
+    with patch.object(llm_service.router_client.chat.completions, 'create',
+                      new_callable=AsyncMock) as mock_api:
+        mock_api.return_value = MagicMock(
+            choices=[MagicMock(message=MagicMock(content=payload))]
+        )
+        _, _, _, slot_hint = await llm_service._route_category('随便说说')
+    assert slot_hint == ''
+
+
+@pytest.mark.asyncio
+async def test_route_failure_returns_four_tuple(llm_service):
+    """降级路径也必须是四元组，否则调用方解包会炸。"""
+    with patch.object(llm_service.router_client.chat.completions, 'create',
+                      new_callable=AsyncMock) as mock_api:
+        mock_api.side_effect = RuntimeError('boom')
+        result = await llm_service._route_category('随便说说')
+    assert len(result) == 4
+    assert result[0] == 'neutral'
+    assert result[3] == ''
+
+
+def test_router_prompt_lists_askable_slots_only():
+    """prompt 里的候选字段从 schema 动态生成，不手写第二份（避免两边漂移）。"""
+    from prompts.templates import ROUTER_SYSTEM_PROMPT
+    assert 'sleep' in ROUTER_SYSTEM_PROMPT
+    assert 'hometown' in ROUTER_SYSTEM_PROMPT
+    assert 'talkativeness' not in ROUTER_SYSTEM_PROMPT, '观察类字段不该出现在候选里'
+    assert 'room_number' not in ROUTER_SYSTEM_PROMPT, '外部录入字段不该出现在候选里'

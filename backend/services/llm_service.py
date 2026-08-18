@@ -1,6 +1,7 @@
 import asyncio
 import json
 import logging
+import time
 from typing import AsyncGenerator, Optional
 from datetime import datetime, timezone, timedelta
 from pathlib import Path
@@ -33,11 +34,16 @@ from prompts.templates import (
     build_normal_prompt,
     build_crisis_prompt,
     build_closing_prompt,
+    build_proactive_prompt,
     ROUTER_SYSTEM_PROMPT,
     build_router_user_prompt,
     resolve_strategy_id,
     CATEGORY_STRATEGY_MAP,
+    build_elicitation_block,
 )
+from services.profile_schema import is_askable
+from services.elicitation import MODE_NONE, plan_elicitation
+from services.proactive import ProactiveGuard
 
 logger = logging.getLogger(__name__)
 
@@ -54,6 +60,16 @@ def _grade_effect(delta: float) -> str:
     if delta <= _VALENCE_WORSENED_DELTA:
         return '下降'
     return '持平'
+
+
+# 耳背时在类别语速基础上再放慢的比例，以及绝对下限。
+# 下限存在的理由：再慢也得像正常说话——慢过头会变得诡异，反而更难听懂。
+_HEARING_SLOWDOWN = 0.85
+_MIN_SPEECH_SPEED = 0.70
+
+# 判定"耳背"的关键词。画像里存的是老人自己的说法，不是枚举值，
+# 所以这里用包含匹配而不是等值比较。
+_HARD_OF_HEARING_HINTS = ('耳背', '听不清', '大声', '聋', '听力不好', '耳朵背')
 
 
 class LLMService:
@@ -87,10 +103,13 @@ class LLMService:
       中性的话识别成"同一段叙事的延续"，而不是逐句独立判断导致中途误判成 neutral。
     """
 
-    def __init__(self, memory_service=None):
+    def __init__(self, memory_service=None, profile_service=None):
         # 长程记忆服务（MemoryService）。为 None 时整套记忆逻辑静默跳过，
         # 对话本身照常工作——记忆是增强能力，不是对话的前置依赖。
         self.memory = memory_service
+        # 画像服务。为 None 时整套采集逻辑静默跳过，对话照常工作——
+        # 和记忆一样，画像是增强能力，不是对话的前置依赖。
+        self.profile = profile_service
         # 后台任务引用：asyncio 只持弱引用，不自己存着的话任务可能被 GC 掉
         self._bg_tasks: set = set()
         # 已滑出历史窗口、等待压缩进摘要的消息：{session_id: [msg, ...]}
@@ -118,6 +137,9 @@ class LLMService:
         self.crisis_vigilance: dict[str, int] = {}
         # 会话弧线状态：{session_id: {started_at, turn_count, consecutive_questions}}
         self.session_meta: dict[str, dict] = {}
+        # 主动开口护栏（夜间静默 / 每日上限 / 无人应答）。放在服务端而不是前端：
+        # 前端可以被绕过、可以有 bug、可以在多个标签页里各跑一份计时器。
+        self.proactive_guard = ProactiveGuard()
         logger.info("LLM 服务初始化完成 ✅ (生成: Qwen/AsyncOpenAI | 路由: DeepSeek/AsyncOpenAI | 策略延续: 已启用 | 类别延续: 已启用 | 危机警惕期: 已启用)")
 
     # ─── 路由 LLM ───────────────────────────────────────────────────────────
@@ -130,7 +152,7 @@ class LLMService:
         used_strategies: str = "",
         crisis_recent: bool = False,
         strategy_feedback: str = "",
-    ) -> tuple[str, str, str]:
+    ) -> tuple[str, str, str, str]:
         """
         调用独立的路由模型（DeepSeek），判断当前这句话的心理类别，并选出这一轮
         该用的具体策略 id。
@@ -157,10 +179,12 @@ class LLMService:
                 风险已经过去。
 
         Returns:
-            (category, matched_signals, strategy_id)
+            (category, matched_signals, strategy_id, slot_hint)
             strategy_id 为空字符串时，表示路由没有给出有效策略（is_crisis、解析
             失败、或返回的 id 不在该类别策略列表内），下游会通过 resolve_strategy_id()
             兜底为该类别的第一条策略。
+            slot_hint 为空字符串时，表示这一轮没有采集线索（没提到、拿不准、
+            或返回了非法字段名）。
         """
         try:
             resp = await self.router_client.chat.completions.create(
@@ -184,7 +208,7 @@ class LLMService:
             raw = resp.choices[0].message.content
             if not raw:
                 logger.warning("路由调用返回空内容，降级为 neutral")
-                return 'neutral', '', ''
+                return 'neutral', '', '', ''
 
             result = json.loads(raw.strip())
             category = result.get('category', 'neutral')
@@ -192,12 +216,18 @@ class LLMService:
             matched_signals = result.get('matched_signals', '')
             strategy_id = result.get('strategy_id', '')
 
+            # 采集线索：非法字段名一律当空（设计文档 §4.1）。
+            # 采集是增强能力，报错的线索宁可丢掉，也不能让它污染这一轮。
+            slot_hint = result.get('slot_hint', '') or ''
+            if not is_askable(slot_hint):
+                slot_hint = ''
+
             if is_crisis or category == 'crisis':
-                return 'crisis', matched_signals, ''
+                return 'crisis', matched_signals, '', ''
 
             if category not in CATEGORY_STRATEGY_MAP:
                 logger.warning(f"路由模型返回未知类别 '{category}'，降级为 neutral")
-                return 'neutral', matched_signals, ''
+                return 'neutral', matched_signals, '', slot_hint
 
             valid_ids = {s['id'] for s in CATEGORY_STRATEGY_MAP[category]['strategies']}
             if strategy_id not in valid_ids:
@@ -212,11 +242,11 @@ class LLMService:
                 f"路由结果: category={category}, strategy_id={strategy_id or '(待兜底)'}, "
                 f"signals={matched_signals}"
             )
-            return category, matched_signals, strategy_id
+            return category, matched_signals, strategy_id, slot_hint
 
         except Exception as e:
             logger.error(f"路由调用失败: {e}，降级为 neutral")
-            return 'neutral', '路由暂不可用', ''
+            return 'neutral', '路由暂不可用', '', ''
 
     @staticmethod
     def _build_router_context(conversation: list[dict], turns: int) -> str:
@@ -231,7 +261,7 @@ class LLMService:
             return ''
         recent = conversation[-(turns * 2):]
         lines = [
-            f"{'老人' if msg['role'] == 'user' else '心伴'}：{msg['content'][:60]}"
+            f"{'老人' if msg['role'] == 'user' else '蘅小年'}：{msg['content'][:60]}"
             for msg in recent
         ]
         return '\n'.join(lines)
@@ -298,6 +328,10 @@ class LLMService:
                 'started_at': datetime.now(timezone.utc),
                 'turn_count': 0,
                 'consecutive_questions': 0,
+                # ── 采集节奏（设计文档 §4.2/§4.3）──
+                'elicited_count': 0,      # 本会话已主动起了几个话头（不含 address）
+                'last_elicit_turn': -999, # 上次主动采集在第几轮，用于冷却
+                'address_asked': False,   # 本会话是否已问过称呼
             }
         return self.session_meta[session_id]
 
@@ -352,6 +386,11 @@ class LLMService:
         crisis: bool,
     ):
         """安排本轮的记忆后台工作：事实抽取 + （必要时）滚动摘要压缩。"""
+        # 画像抽取：和记忆抽取并行的独立后台调用，不受 self.memory 是否启用影响
+        # ——两个服务解耦，各自可独立失败/独立开关。都在后台，不占关键路径。
+        if self.profile is not None and not crisis and user_text.strip():
+            self._spawn_bg(self.profile.observe_turn(elder_id, user_text))
+
         if self.memory is None:
             return
 
@@ -429,11 +468,15 @@ class LLMService:
             self.sessions[session_id] = []
         conversation = self.sessions[session_id]
 
+        # 分段计时：一轮回复慢在哪一段，光靠感觉判断不出来
+        _t0 = time.monotonic()
+
         # ── 步骤 2：关键词危机检测（硬性熔断层，第一优先级，不依赖任何 LLM）────
         category = 'neutral'      # 默认值（危机被拦截、或路由失败兜底时使用）
         matched_signals = ''
         strategy_id = ''
         strategy_name = ''
+        slot_hint = ''            # 路由未跑（危机命中）时保持空
         crisis = self._check_crisis(user_text)
         # 本轮开始时是否已处于警惕期——要在下面可能重新置位之前先取出来
         crisis_vigilant = self._is_crisis_vigilant(session_id)
@@ -448,11 +491,12 @@ class LLMService:
             last_category = self.last_category.get(session_id, '')
             # 先结算上一条策略的效果，再让路由决定这一轮该不该往下推进
             strategy_feedback = self._settle_last_strategy(session_id, emotion)
-            category, matched_signals, raw_strategy_id = await self._route_category(
+            category, matched_signals, raw_strategy_id, slot_hint = await self._route_category(
                 user_text, context, last_category, used_strategies,
                 crisis_recent=crisis_vigilant,
                 strategy_feedback=strategy_feedback,
             )
+            logger.info(f"⏱ 路由({DEEPSEEK_MODEL}) {(time.monotonic()-_t0)*1000:.0f}ms")
             if category == 'crisis':
                 crisis = True
                 logger.warning(f"⚠️  危机信号触发 (路由 LLM) | Session: {session_id} | 文本: {user_text[:50]}")
@@ -483,6 +527,34 @@ class LLMService:
         else:
             self._decay_crisis_vigilance(session_id)
 
+        # ── 步骤 3.6：采集规划（纯逻辑，不调 LLM）─────────────────────────────
+        meta = self._get_session_meta(session_id)
+        # 记下本轮开始时的值——_note_reply_shape() 稍后会用本轮回复更新这个
+        # 计数器，届时它反映的就是"这一轮"而不是"上一轮"了，必须提前存好。
+        ai_asked_question_prev_turn = meta['consecutive_questions'] > 0
+        elicit_block = ''
+        plan = None
+        if self.profile is not None:
+            try:
+                plan = plan_elicitation(
+                    self.profile.get_profile(elder_id),
+                    slot_hint                  = slot_hint,
+                    category                   = category,
+                    phase                      = self.get_phase(session_id),
+                    crisis                     = crisis,
+                    crisis_vigilant            = crisis_vigilant,
+                    restrain_questions         = self._should_restrain_questions(session_id),
+                    turns_since_last_elicit    = meta['turn_count'] - meta['last_elicit_turn'],
+                    elicited_this_session      = meta['elicited_count'],
+                    address_asked_this_session = meta['address_asked'],
+                )
+                if plan.mode != MODE_NONE:
+                    elicit_block = build_elicitation_block(plan.mode, plan.slot, plan.is_stale)
+            except Exception as e:
+                # 采集失败不影响对话（设计文档 §9）
+                logger.warning(f"采集规划失败（忽略，不影响对话）: {e}")
+                plan = None
+
         # ── 步骤 4：构建 System Prompt ──────────────────────────────────────
         if crisis:
             system_prompt = build_crisis_prompt()
@@ -493,6 +565,8 @@ class LLMService:
                 session_summary = self.memory.get_summary(session_id) if self.memory else '',
                 phase              = self.get_phase(session_id),
                 restrain_questions = self._should_restrain_questions(session_id),
+                profile_context   = self.profile.get_context(elder_id) if self.profile else '',
+                elicitation_block = elicit_block,
             )
             if crisis_vigilant:
                 logger.info(f"危机警惕期生效 | Session: {session_id} | 剩余 {self.crisis_vigilance.get(session_id, 0)} 轮")
@@ -509,7 +583,7 @@ class LLMService:
             'category':      category if not crisis else 'crisis',
             'strategy_id':   strategy_id,
             'strategy_name': strategy_name,
-            'tts_params':    self._get_tts_params_by_category(category, crisis),
+            'tts_params':    self._get_tts_params_by_category(category, crisis, elder_id),
         }
 
         # ── 步骤 5：追加用户消息到历史 ──────────────────────────────────────
@@ -548,9 +622,15 @@ class LLMService:
 
         # ── 步骤 9：流式处理输出 ─────────────────────────────────────────────
         full_reply = ''
+        _t_gen = time.monotonic()
         async for chunk in stream:
             delta_text = chunk.choices[0].delta.content or ''
             if delta_text:
+                if not full_reply:
+                    logger.info(
+                        f"⏱ 生成首字({QWEN_MODEL}) {(time.monotonic()-_t_gen)*1000:.0f}ms "
+                        f"| 本轮累计 {(time.monotonic()-_t0)*1000:.0f}ms"
+                    )
                 full_reply += delta_text
                 yield {
                     'type':   'delta',
@@ -567,6 +647,31 @@ class LLMService:
 
         self._get_session_meta(session_id)['turn_count'] += 1
 
+        # ── 步骤 10.4：推进采集计数（问出去了才算，规划器只是打算）──────────────
+        if plan is not None and plan.mode != MODE_NONE and self.profile is not None:
+            try:
+                self.profile.note_asked(elder_id, plan.slot)
+                if plan.slot == 'address':
+                    # address 不计入会话名额：它不是采集，是自我介绍的一部分
+                    meta['address_asked'] = True
+                else:
+                    meta['elicited_count'] += 1
+                    meta['last_elicit_turn'] = meta['turn_count']
+            except Exception as e:
+                logger.warning(f"采集计数推进失败（忽略）: {e}")
+
+        # ── 步骤 10.6：行为观测（同步、纯计数，不调 LLM）─────────────────────
+        if self.profile is not None and not crisis:
+            try:
+                # ai_asked_question 用的是**上一轮**回复是否以问句结尾——
+                # 老人这一句正是对那一句的回应
+                self.profile.observe_behavior(
+                    elder_id, user_text, category,
+                    ai_asked_question=ai_asked_question_prev_turn,
+                )
+            except Exception as e:
+                logger.warning(f"行为观测失败（忽略）: {e}")
+
         # ── 步骤 10.5：安排记忆的后台工作（不阻塞本轮回复）────────────────────
         self._schedule_memory_work(elder_id, session_id, user_text, dropped, crisis)
 
@@ -578,7 +683,7 @@ class LLMService:
             'category':      category if not crisis else 'crisis',
             'strategy_id':   strategy_id,
             'strategy_name': strategy_name,
-            'tts_params':    self._get_tts_params_by_category(category, crisis),
+            'tts_params':    self._get_tts_params_by_category(category, crisis, elder_id),
         }
 
     # ─── 收束仪式 ───────────────────────────────────────────────────────────
@@ -643,6 +748,126 @@ class LLMService:
             'category': 'closing', 'strategy_id': '', 'strategy_name': '道别',
             'tts_params': tts_params,
         }
+
+    # ─── 主动开口 ───────────────────────────────────────────────────────────
+
+    async def stream_proactive(
+        self,
+        session_id: str = 'default',
+        elder_id:   str = 'default_elder',
+        trigger:    str = 'scheduled',
+    ) -> AsyncGenerator[dict, None]:
+        """AI 主动说一段话（定时招呼 / 沉默唤起）。
+
+        形状和 stream_closing 完全一致（meta → delta... → done），前端复用
+        同一条播放通路。
+
+        与 closing 的一个关键差别：**生成失败时不兜底说一句**。closing 失败
+        必须有兜底（不能把刚敞开心扉的人晾在那儿），proactive 失败必须没有
+        兜底——不能因为失败就反复出声（设计文档 §9）。
+        """
+        address  = self.profile.get_address(elder_id) if self.profile else '您'
+        memory   = self.memory.get_context(elder_id) if self.memory else ''
+        prof_ctx = self.profile.get_context(elder_id) if self.profile else ''
+
+        # 主动开口的时刻没有正在进行的叙事，是采集的最佳窗口（设计文档 §6.2）
+        meta = self._get_session_meta(session_id)
+        elicit_block, plan = '', None
+        if self.profile is not None:
+            try:
+                plan = plan_elicitation(
+                    self.profile.get_profile(elder_id),
+                    slot_hint                  = '',
+                    category                   = self.last_category.get(session_id, 'neutral'),
+                    phase                      = self.get_phase(session_id),
+                    crisis                     = False,
+                    crisis_vigilant            = self._is_crisis_vigilant(session_id),
+                    restrain_questions         = self._should_restrain_questions(session_id),
+                    turns_since_last_elicit    = meta['turn_count'] - meta['last_elicit_turn'],
+                    elicited_this_session      = meta['elicited_count'],
+                    address_asked_this_session = meta['address_asked'],
+                )
+                if plan.mode != MODE_NONE:
+                    elicit_block = build_elicitation_block(plan.mode, plan.slot, plan.is_stale)
+            except Exception as e:
+                logger.warning(f"主动开口采集规划失败（忽略）: {e}")
+                plan = None
+
+        system_prompt = build_proactive_prompt(
+            address, trigger,
+            memory_context    = memory,
+            profile_context   = prof_ctx,
+            elicitation_block = elicit_block,
+        )
+
+        # 主动开口一律用平缓语气，不跟着任何类别走
+        tts_params = CATEGORY_TTS_PARAMS_MAP['neutral']
+        yield {
+            'type': 'meta', 'crisis': False, 'category': 'proactive',
+            'strategy_id': '', 'strategy_name': '主动问候', 'tts_params': tts_params,
+        }
+
+        try:
+            stream = await self.client.chat.completions.create(
+                model       = QWEN_MODEL,
+                messages    = [
+                    {'role': 'system', 'content': system_prompt},
+                    {'role': 'user',   'content': '（现在轮到你先开口。）'},
+                ],
+                stream      = True,
+                max_tokens  = LLM_MAX_TOKENS,
+                temperature = LLM_TEMPERATURE,
+                top_p       = LLM_TOP_P,
+            )
+        except Exception as e:
+            # 静默放弃：不重试、不兜底说一句
+            logger.warning(f"主动开口生成失败，本次放弃 (Session: {session_id}): {e}")
+            yield {'type': 'done', 'full_text': '', 'crisis': False,
+                   'category': 'proactive', 'strategy_id': '',
+                   'strategy_name': '主动问候', 'tts_params': tts_params}
+            return
+
+        full_reply = ''
+        async for chunk in stream:
+            delta_text = chunk.choices[0].delta.content or ''
+            if delta_text:
+                full_reply += delta_text
+                yield {'type': 'delta', 'text': delta_text, 'crisis': False}
+
+        # 主动说的话必须进历史，否则老人回应时模型不知道自己刚说了什么
+        if full_reply:
+            self.sessions.setdefault(session_id, []).append(
+                {'role': 'assistant', 'content': full_reply}
+            )
+            self._note_reply_shape(session_id, full_reply)
+            if plan is not None and plan.mode != MODE_NONE and self.profile is not None:
+                try:
+                    self.profile.note_asked(elder_id, plan.slot)
+                    if plan.slot == 'address':
+                        meta['address_asked'] = True
+                    else:
+                        meta['elicited_count'] += 1
+                        meta['last_elicit_turn'] = meta['turn_count']
+                except Exception as e:
+                    logger.warning(f"主动开口采集计数推进失败（忽略）: {e}")
+
+        yield {
+            'type': 'done', 'full_text': full_reply, 'crisis': False,
+            'category': 'proactive', 'strategy_id': '',
+            'strategy_name': '主动问候', 'tts_params': tts_params,
+        }
+
+    def can_speak_proactively(self, session_id: str, elder_id: str) -> tuple[bool, str]:
+        """这一刻能不能主动开口。返回 (可以吗, 不可以的原因)。"""
+        return self.proactive_guard.can_speak(
+            elder_id, crisis_vigilant=self._is_crisis_vigilant(session_id),
+        )
+
+    def note_proactive_answered(self, elder_id: str) -> None:
+        self.proactive_guard.note_answered(elder_id)
+
+    def note_proactive_no_answer(self, elder_id: str) -> None:
+        self.proactive_guard.note_no_answer(elder_id)
 
     # ─── 危机检测 ───────────────────────────────────────────────────────────
 
@@ -728,13 +953,72 @@ class LLMService:
         label = emotion.get('label', 'neutral')
         return TTS_PARAMS_MAP.get(label, TTS_PARAMS_MAP['neutral'])
 
-    def _get_tts_params_by_category(self, category: str, crisis: bool) -> dict:
-        """根据路由模型判定的心理类别返回 TTS 参数（语义驱动）。"""
-        if crisis:
-            return CATEGORY_TTS_PARAMS_MAP['crisis']
-        return CATEGORY_TTS_PARAMS_MAP.get(category, CATEGORY_TTS_PARAMS_MAP['neutral'])
+    def _get_tts_params_by_category(
+        self, category: str, crisis: bool, elder_id: str = '',
+    ) -> dict:
+        """按心理类别取 TTS 参数，并按听力状况做一次放慢。
+
+        这是画像里唯一能反向改变系统行为的字段（设计文档 §3.4）：其他字段
+        只让 AI 会说话，这个字段让 App 变得能用。
+        """
+        key = 'crisis' if crisis else (category or 'neutral')
+        params = dict(CATEGORY_TTS_PARAMS_MAP.get(
+            key, CATEGORY_TTS_PARAMS_MAP['neutral']))
+
+        if not elder_id or self.profile is None:
+            return params
+        try:
+            slot = self.profile.get_profile(elder_id)['slots']['sensory_hearing']
+            if slot['status'] in ('filled', 'stale') and any(
+                hint in slot['value'] for hint in _HARD_OF_HEARING_HINTS
+            ):
+                params['speed'] = max(
+                    _MIN_SPEECH_SPEED, round(params['speed'] * _HEARING_SLOWDOWN, 2))
+        except Exception as e:
+            logger.warning(f"听力参数调整失败（用默认语速）: {e}")
+        return params
 
     # ─── 会话管理 ────────────────────────────────────────────────────────────
+
+    def truncate_last_reply(self, session_id: str, spoken_text: str) -> bool:
+        """
+        老人插话打断时，把历史里最后一条回复截断成**实际播出去**的那部分。
+
+        不做这件事的话，历史里存的是完整回复，模型以为自己整段都说完了，
+        下一轮可能出现「我刚才跟你说的那个……」——而老人根本没听到后半截。
+        对陪伴场景来说这不是小瑕疵：它会让老人觉得对方在说些莫名其妙的话。
+
+        spoken_text 为空（一个字都没播出去）时，整条回复从历史里移除。
+
+        Returns:
+            True 表示确实改动了历史，False 表示没有可截断的回复。
+        """
+        conversation = self.sessions.get(session_id)
+        if not conversation or conversation[-1]['role'] != 'assistant':
+            return False
+
+        spoken = (spoken_text or '').strip()
+        original = conversation[-1]['content']
+        if spoken == original:
+            return False
+
+        if spoken:
+            conversation[-1]['content'] = spoken
+        else:
+            conversation.pop()
+
+        # 提问节制是按"回复是不是以问句结尾"统计的，截断后要按实际说出口的重算
+        meta = self._get_session_meta(session_id)
+        if spoken.endswith(('？', '?')):
+            pass                       # 截断后仍是问句，计数不变
+        else:
+            meta['consecutive_questions'] = 0
+
+        logger.info(
+            f"回复被打断，历史已截断 | Session: {session_id} | "
+            f"{len(original)} 字 → {len(spoken)} 字"
+        )
+        return True
 
     async def close_session(self, session_id: str = 'default', elder_id: str = ''):
         """

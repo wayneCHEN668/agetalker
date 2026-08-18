@@ -2,7 +2,9 @@ import React, { useState, useCallback, useRef, useEffect } from 'react';
 import { StyleSheet, View, SafeAreaView, Text, TouchableOpacity } from 'react-native';
 import { Design } from '@/constants/Design';
 import { CATEGORY_ZH_MAP } from '@/constants/Category';
-import { newSessionId } from '@/constants/Session';
+import {
+  newSessionId, SILENCE_PROMPT_MS, PROACTIVE_SCHEDULE, PROACTIVE_NO_ANSWER_MS,
+} from '@/constants/Session';
 import { StatusBar } from '@/components/StatusBar';
 import { TranscriptArea } from '@/components/TranscriptArea';
 import { Waveform } from '@/components/Waveform';
@@ -37,14 +39,30 @@ export default function HomeScreen() {
   // 用 ref 转一层：finishEndSession 依赖 stopTTS，而 stopTTS 来自 useTTS，
   // 直接互相引用会成环
   const onPlaybackDoneRef = useRef<() => void>(() => {});
+  // 沉默唤起计时器。老人开着对话但一直没说话时，AI 先开口。
+  const silenceTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  // 今天已经触发过的时间点（小时）。防止同一个整点内反复触发。
+  const firedHoursRef = useRef<Set<string>>(new Set());
+  const noAnswerTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  // 主动招呼之后，老人有没有搭话
+  const proactiveAnsweredRef = useRef(false);
 
   // 1. TTS
-  const { speak, stop: stopTTS, isPlayingRef: ttsPlayingRef } = useTTS({
+  const {
+    speak, stop: stopTTS, stopForBargeIn, getSpokenText, resetSpokenText,
+    isPlayingRef: ttsPlayingRef,
+  } = useTTS({
     onPlaybackDone: () => onPlaybackDoneRef.current(),
   });
 
   // 2. LLM
-  const { fetchReply, fetchClosing, reset: resetLLM, isCrisis } = useLLM({
+  // 当前是否有一条回复正在生成（state 在回调里会读到旧值，用 ref）
+  const replyInFlightRef = useRef(false);
+
+  const {
+    fetchReply, fetchClosing, fetchProactive, reportProactiveOutcome,
+    abort: abortLLM, reset: resetLLM, isCrisis,
+  } = useLLM({
     onDelta: (deltaText) => {
       setIsLLMStreaming(true);
       setMessages((prev) => {
@@ -91,13 +109,74 @@ export default function HomeScreen() {
       }
       streamingIndexRef.current = null;
       setIsLLMStreaming(false);
+      replyInFlightRef.current = false;
+      armSilenceTimer();
     },
   });
 
+  /**
+   * 作废正在进行中的那条回复。
+   *
+   * 触发场景：老人一句话被 ASR 切成了两段，第二段到达时第一条回复已经在生成
+   * 或播放了。不作废的话两条回复都会发出来，而且内容常常大半重复——实测就是
+   * 这个现象。这里把它就地掐掉，让下一次生成拿着完整的话重新说。
+   */
+  const discardOngoingReply = useCallback(async () => {
+    if (!replyInFlightRef.current && !ttsPlayingRef.current) return;
+
+    const spoken = getSpokenText();
+    abortLLM();
+    stopForBargeIn();
+    replyInFlightRef.current = false;
+
+    // 屏幕上那半条回复：说出口了就截断保留，一个字没说就整条撤掉
+    setMessages((prev) => {
+      const idx = streamingIndexRef.current;
+      if (idx === null || idx >= prev.length || prev[idx].role !== 'assistant') return prev;
+      const updated = [...prev];
+      if (spoken.trim()) {
+        updated[idx] = { ...updated[idx], text: spoken, interrupted: true };
+      } else {
+        updated.splice(idx, 1);
+      }
+      return updated;
+    });
+    streamingIndexRef.current = null;
+    setIsLLMStreaming(false);
+
+    // 必须等截断完成再发下一轮请求，否则新的用户消息先进历史，
+    // 截断就找不到那条待处理的回复了
+    try {
+      await fetch(`http://localhost:8050/llm/truncate_last`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          session_id: sessionIdRef.current,
+          spoken_text: spoken,
+        }),
+      });
+    } catch (err) {
+      console.warn('[HomeScreen] 截断历史失败:', err);
+    }
+  }, [abortLLM, stopForBargeIn, getSpokenText]);
+
   // 3. ASR
   const { start, stop: stopASR, status, isRecording, analyser } = useASR({
-    onTranscript: (text, isFinal, emotion) => {
+    onTranscript: async (text, isFinal, emotion) => {
       if (isFinal) {
+        clearSilenceTimer();
+        // 他搭话了：撤掉无人应答的收场计时
+        if (noAnswerTimerRef.current) {
+          clearTimeout(noAnswerTimerRef.current);
+          noAnswerTimerRef.current = null;
+          if (!proactiveAnsweredRef.current) {
+            proactiveAnsweredRef.current = true;
+            reportProactiveOutcome(true);
+          }
+        }
+        // 老人又开口了：先把上一条还没说完的回复作废
+        await discardOngoingReply();
+
         setMessages((prev) => {
           const filtered = prev.filter((m) => !m.isInterim);
           const userMsg: ChatMessage = {
@@ -110,6 +189,8 @@ export default function HomeScreen() {
 
         const emotionLabel = emotion?.label || 'neutral';
         setCurrentEmotion(emotionLabel);
+        resetSpokenText();   // 新一轮回复开始，重置「已播出」的累计
+        replyInFlightRef.current = true;
         fetchReply(text, emotion, sessionIdRef.current);
       } else {
         setMessages((prev) => {
@@ -131,10 +212,43 @@ export default function HomeScreen() {
     onError: (msg) => {
       setErrorMessage(msg);
     },
+    /**
+     * 老人在 AI 说话时插话：立刻停声让他说，并把历史截断到实际播出去的部分。
+     *
+     * 截断这一步不能省——历史里存的是完整回复，模型会以为自己整段说完了，
+     * 下一轮可能引用老人根本没听到的后半截。
+     */
+    onBargeIn: () => {
+      const spoken = getSpokenText();
+      stopForBargeIn();
+
+      // 把气泡里的文字也收到实际听到的位置，屏幕和耳朵保持一致
+      setMessages((prev) => {
+        const idx = streamingIndexRef.current;
+        if (idx !== null && idx < prev.length && prev[idx].role === 'assistant') {
+          const updated = [...prev];
+          updated[idx] = { ...updated[idx], text: spoken, interrupted: true };
+          return updated;
+        }
+        return prev;
+      });
+      streamingIndexRef.current = null;
+      setIsLLMStreaming(false);
+
+      fetch(`http://localhost:8050/llm/truncate_last`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          session_id: sessionIdRef.current,
+          spoken_text: spoken,
+        }),
+      }).catch((err) => console.warn('[HomeScreen] 截断历史失败:', err));
+    },
   });
 
   const toggleConversation = useCallback(() => {
     if (isRecording) {
+      clearSilenceTimer();
       // 停止录音 — 先确认
       if (messages.length > 0) {
         setShowEndDialog(true);
@@ -207,12 +321,135 @@ export default function HomeScreen() {
     resetLLM(sessionIdRef.current);
   }, [resetLLM, stopTTS, ttsPlayingRef]);
 
+  /** 清掉沉默计时器。任何"有动静"的地方都要调它。 */
+  const clearSilenceTimer = useCallback(() => {
+    if (silenceTimerRef.current) {
+      clearTimeout(silenceTimerRef.current);
+      silenceTimerRef.current = null;
+    }
+  }, []);
+
+  /**
+   * 重新开始计时。
+   *
+   * 必须排除两个区间，否则 AI 会在自己刚说完的瞬间又开口：
+   *   1. TTS 播放期间（ttsPlayingRef）
+   *   2. LLM 生成期间（replyInFlightRef）
+   * 这两个区间结束时会各自再调一次本函数，所以这里直接不排是安全的。
+   */
+  const armSilenceTimer = useCallback(() => {
+    clearSilenceTimer();
+    if (!isRecording || isEndingRef.current) return;
+    if (ttsPlayingRef.current || replyInFlightRef.current) return;
+
+    silenceTimerRef.current = setTimeout(async () => {
+      // 触发的一刻再查一次：这段时间里可能已经开始播/开始生成了
+      if (!isRecording || isEndingRef.current) return;
+      if (ttsPlayingRef.current || replyInFlightRef.current) return;
+
+      replyInFlightRef.current = true;
+      const result = await fetchProactive(sessionIdRef.current, 'silence');
+      // 被作废（老人在等待期间又开口了）：discardOngoingReply() 已经接管了
+      // replyInFlightRef（先置 false 再为即将开始的真实回复置 true），这里
+      // 不能再碰它，否则会把真实回复刚设的 true 冲掉。也不重新计时——
+      // 是否要计时由真实回复流程自己决定。
+      if (result?.reason !== 'aborted') {
+        replyInFlightRef.current = false;
+
+        // 没说出实际内容（被护栏拦下 / 生成失败）：安静收场，
+        // 不重试、不提示老人，但要重新计时——过一会儿条件可能就满足了。
+        if (!result?.fullText) armSilenceTimer();
+      }
+    }, SILENCE_PROMPT_MS);
+  }, [isRecording, fetchProactive, clearSilenceTimer, ttsPlayingRef]);
+
+  // start(sessionId) 不会同步更新 isRecording（state 更新是异步的），紧跟着直接
+  // 调 armSilenceTimer 会读到还没更新的旧值、直接被守卫短路掉。改成响应式：
+  // isRecording 真正变成 true 的那次渲染才去 arm。
+  useEffect(() => {
+    if (isRecording) armSilenceTimer();
+  }, [isRecording, armSilenceTimer]);
+
+  // 卸载时清掉沉默计时器
+  useEffect(() => clearSilenceTimer, [clearSilenceTimer]);
+
+  /**
+   * 定时主动招呼。
+   *
+   * 每分钟查一次表，到点且当前没有进行中的对话就自动开一个会话、AI 先说话、
+   * 然后自动开麦。
+   *
+   * 错过不补发（设计文档 §9）：App 在后台或设备休眠时错过的时间点直接跳过，
+   * 否则回前台会一次性说三段话。firedHoursRef 用「日期+小时」做键，天然满足
+   * 这一点——过了那个小时就再也不会触发。
+   */
+  useEffect(() => {
+    const tick = async () => {
+      if (isRecording || isEndingRef.current) return;
+
+      const now = new Date();
+      const key = `${now.toDateString()}#${now.getHours()}`;
+      if (!PROACTIVE_SCHEDULE.includes(now.getHours())) return;
+      if (firedHoursRef.current.has(key)) return;
+      firedHoursRef.current.add(key);
+
+      const sessionId = newSessionId();
+      sessionIdRef.current = sessionId;
+      setMessages([]);
+      setCurrentEmotion('neutral');
+      setErrorMessage('');
+      proactiveAnsweredRef.current = false;
+
+      const result = await fetchProactive(sessionId, 'scheduled');
+      // 被护栏拦下（夜间静默/每日上限/连续无应答）：安静收场，什么都不做
+      if (result?.blocked || !result?.fullText) return;
+
+      // 说完了自动开麦，等他搭话
+      start(sessionId);
+      armNoAnswerTimer();
+    };
+
+    const id = setInterval(tick, 60_000);
+    tick();
+    return () => clearInterval(id);
+  }, [isRecording, fetchProactive, start]);
+
+  /**
+   * 无人应答收场。
+   *
+   * 定时招呼时老人很可能不在。等一个窗口没人搭话就安静停掉、上报服务端；
+   * 连续几次之后服务端当天不再主动开口——没有这条，设备会变成定时扰民的
+   * 喇叭，而且扰的是隔壁床的人。
+   */
+  const armNoAnswerTimer = useCallback(() => {
+    if (noAnswerTimerRef.current) clearTimeout(noAnswerTimerRef.current);
+    noAnswerTimerRef.current = setTimeout(() => {
+      noAnswerTimerRef.current = null;
+      if (proactiveAnsweredRef.current) return;
+      // 没人应答：停掉录音，安静收场，不再呼叫
+      stopASR();
+      clearSilenceTimer();
+      setMessages([]);
+      reportProactiveOutcome(false);
+    }, PROACTIVE_NO_ANSWER_MS);
+  }, [stopASR, clearSilenceTimer, reportProactiveOutcome]);
+
+  // 卸载时清掉无人应答收场计时器
+  useEffect(() => () => {
+    if (noAnswerTimerRef.current) clearTimeout(noAnswerTimerRef.current);
+  }, []);
+
   // 让 useTTS 的 onPlaybackDone 始终指向最新的 finishEndSession
   useEffect(() => {
-    onPlaybackDoneRef.current = finishEndSession;
-  }, [finishEndSession]);
+    onPlaybackDoneRef.current = () => {
+      finishEndSession();
+      // 普通一轮播完（不在结束流程里）：重新开始等他说话
+      if (!isEndingRef.current) armSilenceTimer();
+    };
+  }, [finishEndSession, armSilenceTimer]);
 
   const doEndSession = useCallback(async () => {
+    clearSilenceTimer();
     const sessionId = sessionIdRef.current;
     stopASR();                 // 先停止收音，但不停 TTS——告别还要靠它说出来
     setShowEndDialog(false);

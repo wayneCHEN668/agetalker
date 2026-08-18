@@ -6,6 +6,7 @@ from services.asr_service import ASRService
 from services.emotion_service import EmotionService
 from services.llm_service import LLMService
 from services.memory_service import MemoryService
+from services.profile_service import ProfileService
 from services.tts_service import TTSService
 from config import MEMORY_ENABLED
 import routers.ws_asr as ws_asr_router
@@ -34,7 +35,9 @@ async def lifespan(app: FastAPI):
     memory_svc = MemoryService() if MEMORY_ENABLED else None
     if memory_svc is None:
         logger.warning("长程记忆已禁用 (MEMORY_ENABLED=0)，模型只能看到最近 6 轮对话")
-    llm_svc = LLMService(memory_service=memory_svc)
+    # 画像采集：和台账是同一类「增强能力」，复用同一个开关，运维上没有分开的理由
+    profile_svc = ProfileService() if MEMORY_ENABLED else None
+    llm_svc = LLMService(memory_service=memory_svc, profile_service=profile_svc)
     tts_svc = TTSService()
     
     # 2. Inject Services into Routers

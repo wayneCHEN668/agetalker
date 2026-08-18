@@ -87,6 +87,29 @@ pytest selftest/test_llm_service.py::test_crisis_detection -v  # single test
 - Dependencies: `backend/requirements.txt` — includes funasr, torch (CPU), fastapi, openai, dashscope
 - Mobile deps: `mobile/package.json` (Expo 52, React 19, expo-router)
 
+## 本地模型缓存 / 部署
+
+四个 ML 模型（ASR + VAD + PUNC + emotion2vec，共 ~3.9G）缓存在 `backend/.model_cache/models/iic/`。`config.py` 里的 `_local_or_hub()` 在启动时检查该目录：
+
+- **目录存在** → 直接把绝对路径传给 funasr。`download_from_ms()` 的 `os.path.exists()` 命中后会跳过整个 ModelScope 流程，**启动不联网，断网也能起**。
+- **目录不存在**（新服务器首次部署）→ 回落到模型 ID（`paraformer-zh` 等），自动下载到该目录，第二次启动起走本地。
+
+部署注意：
+
+- `.model_cache/` 已在 `.gitignore:10` 中排除，`git clone` 拿不到。**内网/无外网的服务器必须手动把这个目录传过去**，否则首次启动会卡在下载。
+- 走本地路径后模型**不再自动更新**（这是有意的，省掉每次启动一次联网版本核对）。要升级模型：删掉对应子目录，下次启动会重新下载。
+- `MODELSCOPE_CACHE` 在 `.env` 里是相对路径，`config.py` 会基于 `backend/` 转成绝对路径 —— 不要改回相对路径直接用，否则从仓库根目录启动会认到空目录并重下 3.9G。
+
+## 已知失效的测试（重构遗留，非回归）
+
+`selftest/` 里这几个是双后端重构（云端 ASR + 本地兜底）之前的产物，改任何代码前就已经是坏的，不要误判成自己弄坏的：
+
+- `test_asr.py` / `test_emotion.py` / `test_model.py` — `ModuleNotFoundError: No module named 'asr_manager'`（模块已删）
+- `test_refactor.py::test_config_loading` — 断言 `ASRService.model`，但 `.model` 现在在 `LocalASRBackend` 上
+- `test_ws.py` / `test_tts.py` — 连真实服务，无服务端时会挂住，跑全量测试时需 `--ignore`
+
+可离线跑的子集：`pytest selftest/test_emotion_refactored.py selftest/test_llm_service.py selftest/test_sentence_merge.py -q`
+
 ## Using Superpower wwriting-plan skill to Write Long Files
 
 **Do NOT use default approach to write the plan, it always return Error 'writing file'

@@ -30,3 +30,25 @@ export const getElderId = (): string => {
 
 export const newSessionId = (): string =>
   `s_${Date.now().toString(36)}_${randomSuffix()}`;
+
+/**
+ * 老人静默多久之后 AI 先开口（毫秒）。
+ *
+ * 远长于 ASR 的 1.5 秒断句阈值——那个判断的是"这句话说完了没有"，
+ * 这个判断的是"他是不是不想说了"。量级估计，需要实机调；调错方向时
+ * 宁可往长了调：对老人而言，被打断的代价远大于多等一会儿。
+ *
+ * 后端 config.SILENCE_PROMPT_SEC 是同一个值，两边都要改。
+ */
+export const SILENCE_PROMPT_MS = 25000;
+
+/**
+ * 默认主动招呼的时间点（小时，本地时间）。
+ *
+ * 画像采到 daily_routine 之前用这张表。注意服务端还有一道夜间静默硬边界
+ * （21:00-07:00），这张表改错了也不会半夜出声。
+ */
+export const PROACTIVE_SCHEDULE = [9, 14, 19];
+
+/** 主动招呼说完后，开麦等多久算没人应答（毫秒）。后端同名参数是 20 秒。 */
+export const PROACTIVE_NO_ANSWER_MS = 20000;

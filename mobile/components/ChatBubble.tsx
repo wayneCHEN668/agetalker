@@ -10,6 +10,8 @@ export interface ChatMessage {
   category_zh?: string;
   strategyName?: string;
   isInterim?: boolean;
+  /** 这条回复说到一半被老人插话打断了 */
+  interrupted?: boolean;
 }
 
 const TypingIndicator: React.FC = () => {

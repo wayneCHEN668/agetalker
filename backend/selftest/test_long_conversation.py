@@ -113,7 +113,7 @@ async def test_early_fact_still_known_at_turn_100(tmp_path):
     svc, patches = _build_service(tmp_path)
     try:
         with patch.object(svc, '_route_category', new_callable=AsyncMock) as mock_route:
-            mock_route.return_value = ('neutral', '', 'natural_followup')
+            mock_route.return_value = ('neutral', '', 'natural_followup', '')
             with patch.object(svc.client.chat.completions, 'create',
                               new_callable=AsyncMock) as mock_create:
                 prompt_at_check = None
@@ -154,7 +154,7 @@ async def test_history_window_alone_would_have_lost_it(tmp_path):
         svc = LLMService(memory_service=None)   # 关掉记忆
 
     with patch.object(svc, '_route_category', new_callable=AsyncMock) as mock_route:
-        mock_route.return_value = ('neutral', '', 'natural_followup')
+        mock_route.return_value = ('neutral', '', 'natural_followup', '')
         with patch.object(svc.client.chat.completions, 'create',
                           new_callable=AsyncMock) as mock_create:
             prompt_at_check = None
@@ -178,7 +178,7 @@ async def test_rolling_summary_accumulates_over_long_run(tmp_path):
     svc, patches = _build_service(tmp_path)
     try:
         with patch.object(svc, '_route_category', new_callable=AsyncMock) as mock_route:
-            mock_route.return_value = ('neutral', '', 'natural_followup')
+            mock_route.return_value = ('neutral', '', 'natural_followup', '')
             with patch.object(svc.client.chat.completions, 'create',
                               new_callable=AsyncMock) as mock_create:
                 for turn in range(40):
@@ -212,7 +212,7 @@ async def test_questions_get_restrained_in_a_long_run(tmp_path):
         svc = LLMService(memory_service=None)
 
     with patch.object(svc, '_route_category', new_callable=AsyncMock) as mock_route:
-        mock_route.return_value = ('neutral', '', 'natural_followup')
+        mock_route.return_value = ('neutral', '', 'natural_followup', '')
         with patch.object(svc.client.chat.completions, 'create',
                           new_callable=AsyncMock) as mock_create:
             # 每一轮回复都以问句结尾
@@ -252,7 +252,7 @@ async def test_phase_reaches_closing_after_long_session(tmp_path):
     assert svc.get_phase(SID) == 'closing'
 
     with patch.object(svc, '_route_category', new_callable=AsyncMock) as mock_route:
-        mock_route.return_value = ('neutral', '', 'natural_followup')
+        mock_route.return_value = ('neutral', '', 'natural_followup', '')
         with patch.object(svc.client.chat.completions, 'create',
                           new_callable=AsyncMock) as mock_create:
             mock_create.return_value = _make_stream(['嗯。'])

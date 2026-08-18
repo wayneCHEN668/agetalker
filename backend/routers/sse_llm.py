@@ -89,6 +89,63 @@ async def stream_closing(session_id: str = 'default', elder_id: str = 'default_e
     )
 
 
+@router.post('/llm/proactive')
+async def stream_proactive_endpoint(
+    session_id: str = 'default',
+    elder_id:   str = 'default_elder',
+    trigger:    str = 'scheduled',
+):
+    """AI 主动开口（trigger: scheduled 定时招呼 / silence 沉默唤起）。
+
+    护栏在**服务端**判断，不信任前端：夜间静默、每日上限、连续无应答、
+    危机警戒期。被挡住时返回一条 blocked 事件，前端据此安静收场——
+    不要重试，也不要提示老人。
+
+    事件结构与 /llm/stream 一致（meta → delta... → done），前端复用同一条
+    播放通路。
+    """
+    if llm_service is None:
+        return {"error": "LLMService not initialized"}
+
+    allowed, reason = llm_service.can_speak_proactively(session_id, elder_id)
+
+    async def generate():
+        if not allowed:
+            logger.info(f"主动开口被护栏拦下 | session={session_id} | reason={reason}")
+            payload = {'type': 'blocked', 'reason': reason}
+            yield f"data: {json.dumps(payload, ensure_ascii=False)}\n\n".encode('utf-8')
+            return
+        llm_service.proactive_guard.note_spoke(elder_id)
+        try:
+            async for chunk in llm_service.stream_proactive(session_id, elder_id, trigger):
+                yield f"data: {json.dumps(chunk, ensure_ascii=False)}\n\n".encode('utf-8')
+        except Exception as e:
+            logger.error(f"Proactive stream error: {e}", exc_info=True)
+            yield f"data: {json.dumps({'type': 'error', 'message': str(e)}, ensure_ascii=False)}\n\n".encode('utf-8')
+
+    return StreamingResponse(
+        generate(),
+        media_type='text/event-stream',
+        headers={'Cache-Control': 'no-cache', 'X-Accel-Buffering': 'no'},
+    )
+
+
+@router.post('/llm/proactive/outcome')
+async def proactive_outcome(elder_id: str = 'default_elder', answered: bool = False):
+    """主动招呼之后老人到底有没有搭话。
+
+    前端在等待窗口结束时上报。连续无应答达到阈值后，当天不再主动开口——
+    没有这条，设备会变成定时扰民的喇叭。
+    """
+    if llm_service is None:
+        return {'status': 'error', 'message': 'LLMService not initialized'}
+    if answered:
+        llm_service.note_proactive_answered(elder_id)
+    else:
+        llm_service.note_proactive_no_answer(elder_id)
+    return {'status': 'ok'}
+
+
 @router.post('/llm/reset')
 async def reset_session(session_id: str = 'default', elder_id: str = ''):
     """
@@ -101,6 +158,24 @@ async def reset_session(session_id: str = 'default', elder_id: str = ''):
         await llm_service.close_session(session_id, elder_id)
         llm_service.reset(session_id)
     return {'status': 'ok', 'session_id': session_id}
+
+
+class TruncateRequest(BaseModel):
+    session_id:  str = Field(default='default', description="会话 ID")
+    spoken_text: str = Field(default='',        description="实际播放出去的回复文本")
+
+
+@router.post('/llm/truncate_last')
+async def truncate_last_reply(req: TruncateRequest):
+    """
+    老人插话打断时调用：把历史里最后一条回复截断成实际听到的部分。
+
+    否则模型以为整段都说完了，下一轮可能引用老人根本没听到的内容。
+    """
+    if llm_service is None:
+        return {'status': 'error', 'message': 'LLMService not initialized'}
+    changed = llm_service.truncate_last_reply(req.session_id, req.spoken_text)
+    return {'status': 'ok', 'truncated': changed}
 
 
 @router.post('/llm/crisis/escalate')

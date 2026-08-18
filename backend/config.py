@@ -15,10 +15,30 @@ else:
 # ── General Configuration ─────────────────────────────────────────────────────
 DEVICE = 'cpu'
 
+# ── 本地模型缓存 ──────────────────────────────────────────────────────────────
+# MODELSCOPE_CACHE 在 .env 里是相对路径，改成绝对路径，避免"从哪个目录启动"
+# 决定模型下到哪里（从仓库根目录启动会认到空目录，然后重下一遍 3.9G）。
+_BACKEND_DIR = os.path.dirname(os.path.abspath(__file__))
+os.environ['MODELSCOPE_CACHE'] = os.path.abspath(
+    os.path.join(_BACKEND_DIR, os.getenv('MODELSCOPE_CACHE', './.model_cache'))
+)
+_MODEL_DIR = os.path.join(os.environ['MODELSCOPE_CACHE'], 'models', 'iic')
+
+
+def _local_or_hub(dirname: str, model_id: str) -> str:
+    """缓存目录存在就直接给 funasr 本地路径——它 os.path.exists() 命中后会跳过
+    整个 ModelScope 流程，启动不联网、断网也能起。目录不存在（新服务器首次部署）
+    则回落到模型 ID，照常自动下载到上面的缓存目录，下次启动即走本地。"""
+    path = os.path.join(_MODEL_DIR, dirname)
+    return path if os.path.isdir(path) else model_id
+
+
 # ── ASR Configuration (STEP 1) ────────────────────────────────────────────────
-ASR_MODEL = 'paraformer-zh'
-ASR_VAD_MODEL = 'fsmn-vad'
-ASR_PUNC_MODEL = 'ct-punc'
+ASR_MODEL = _local_or_hub(
+    'speech_seaco_paraformer_large_asr_nat-zh-cn-16k-common-vocab8404-pytorch', 'paraformer-zh'
+)
+ASR_VAD_MODEL = _local_or_hub('speech_fsmn_vad_zh-cn-16k-common-pytorch', 'fsmn-vad')
+ASR_PUNC_MODEL = _local_or_hub('punc_ct-transformer_cn-en-common-vocab471067-large', 'ct-punc')
 
 ASR_SAMPLE_RATE = 16000
 ASR_FRAME_SAMPLES = 2048        # ~128ms @ 16kHz (Preserved from original)
@@ -39,12 +59,28 @@ ASR_BACKEND = os.getenv('ASR_BACKEND', 'dual')
 ASR_CLOUD_MODEL = 'paraformer-realtime-v2'
 ASR_CLOUD_FORMAT = 'pcm'
 ASR_CLOUD_LANGUAGE_HINTS = ['zh']
-# VAD 断句静音阈值（ms），老年人停顿较长，SDK 默认 800ms 偏短，设为 1200ms
-ASR_CLOUD_MAX_SENTENCE_SILENCE = int(os.getenv('ASR_CLOUD_MAX_SENTENCE_SILENCE', '1200'))
+# VAD 断句静音阈值（ms）。云端只负责**转写分段**，切碎一点没关系——
+# 「这一轮说完了没有」由下面的合并窗口判断。切得早反而有好处：中间结果能更快
+# 显示给老人看。
+ASR_CLOUD_MAX_SENTENCE_SILENCE = int(os.getenv('ASR_CLOUD_MAX_SENTENCE_SILENCE', '1000'))
+
+# ── 整句合并窗口 ─────────────────────────────────────────────────────────────
+# 云端给出一个 final 之后，先不急着交给 LLM，再等这么久：期间只要老人又开口
+# （收到新的中间结果），就说明刚才那只是句中停顿，把两段并起来当一句。
+#
+# 为什么不按尾部标点做自适应（第一版这么干过，是错的）：
+#   ASR 的标点是靠**韵律停顿**插进去的，老人边想边说，思考时的停顿会被插成
+#   句号。实测转写「上面写的名字。叫王翠芬。」——句号出现在一句连贯话的中间。
+#   于是"以句号结尾就少等"这条规则，恰好在老人话说到一半停顿时判定他说完了，
+#   反而更容易切断。标点在这里不是可靠信号，唯一可靠的信号是"他又开口了"。
+#
+# 所以只留一个统一窗口，宁可整体多等一点。对老年人而言，被打断的代价远大于
+# 多等半秒——这个值要在真实场景里调。
+ASR_MERGE_WINDOW_MS = int(os.getenv('ASR_MERGE_WINDOW_MS', '1400'))
 ASR_CLOUD_HEARTBEAT = True   # 静音时持续发送心跳保持连接不断开
 
 # ── Emotion Configuration (STEP 2) ────────────────────────────────────────────
-EMOTION_MODEL = 'iic/emotion2vec_plus_large'
+EMOTION_MODEL = _local_or_hub('emotion2vec_plus_large', 'iic/emotion2vec_plus_large')
 EMOTION_CONF_THRESHOLD = 0.45   # Drop to neutral if below this
 EMOTION_MIN_DURATION_S = 0.5    # Skip if too short
 EMOTION_MAX_DURATION_S = 10.0   # Cap at 10s
@@ -113,7 +149,7 @@ DEEPSEEK_BASE_URL = os.getenv('DEEPSEEK_BASE_URL', 'https://api.deepseek.com')
 # （当前指向 deepseek-v4-flash 的非思考模式），直接用显式模型 ID，免得临到弃用日期前
 # 措手不及。deepseek-v4-flash 本身就是官方推荐用于路由/分类/抽取这类高频轻量任务的模型，
 # 跟我们这里的用途正好匹配。
-DEEPSEEK_MODEL    = os.getenv('DEEPSEEK_MODEL', 'deepseek-v4-pro')
+DEEPSEEK_MODEL    = os.getenv('DEEPSEEK_MODEL', 'deepseek-v4-flash')
 
 if DEEPSEEK_API_KEY:
     print(f"DEBUG: DEEPSEEK_API_KEY loaded (length: {len(DEEPSEEK_API_KEY)})")
@@ -181,6 +217,49 @@ MEMORY_SUMMARY_MAX_CHARS    = 400
 
 # 跨会话保留多少段历史会话摘要（供"上次咱们聊到…"这类回指）
 MEMORY_MAX_SESSION_SUMMARIES = 5
+
+# ── 画像与引导采集（设计文档 2026-08-13）──────────────────────────────────────
+# 画像与台账是两个东西：台账是叙事记忆（自由文本、无限增长），画像是结构化
+# 状态机（有限字段、能判断"填了没有"）。后者是"不重复询问"的前提。
+PROFILE_DIR = os.getenv('PROFILE_DIR', 'data/profiles')
+
+# 一次会话最多主动起几个话头采集。一次对话可能只有 10-20 轮，问 5 条就意味着
+# 25% 以上的轮次在采集，老人一定会察觉到味道变了。
+# 注意：address 的首次询问不计入这个上限（它不是采集，是自我介绍的一部分）。
+ELICIT_MAX_PER_SESSION = 2
+# 两次主动采集之间至少隔多少轮，把上面那 2 次撑开到整段对话里
+ELICIT_COOLDOWN_TURNS = 5
+# 同一个字段问到第几次仍未填上就永久放弃。
+# 这是整套机制里最重要的一道硬闸：没有它，"安全窗口""节流"都只是降低频率，
+# 一个永远填不上的字段最终一定会被问到第五次、第十次。
+ELICIT_MAX_ASK_COUNT = 2
+
+# 观察类字段的最小样本量。样本不足时宁可留空——错误的性格判断会一直影响
+# 后续所有对话的语气。
+OBSERVE_MIN_TURNS         = 20   # talkativeness / interaction_preference
+OBSERVE_MIN_TURNS_EMOTION = 30   # emotional_baseline
+OBSERVE_MIN_SESSIONS      = 5    # attention_span
+
+# ── 主动开口 ─────────────────────────────────────────────────────────────────
+# 老人开着对话但静默多久之后，AI 先开口。远长于 ASR_SILENCE_FRAMES 的 1.5 秒
+# 断句阈值——那个是"这句话说完了没有"，这个是"他是不是不想说了"。
+# 量级估计，必须实机调；调错方向时宁可往长了调（被打断的代价大于多等一会儿）。
+SILENCE_PROMPT_SEC = 25
+
+# 定时招呼说完后开麦等多久算没人应答。略短于沉默唤起——没人应答时不该比
+# 有人时等更久。
+PROACTIVE_NO_ANSWER_SEC = 20
+# 当天连续几次没人应答就停手。没有这条，设备会变成定时扰民的喇叭，
+# 而且扰的是隔壁床的人。
+PROACTIVE_NO_ANSWER_GIVEUP = 2
+# 当天最多主动招呼几次（早中晚的量级，超过就是打扰）
+PROACTIVE_MAX_PER_DAY = 3
+
+# 夜间硬静默窗口（本地时间，含起点不含终点：21:00 <= t 或 t < 07:00 时静默）。
+# 这是防配置错误的兜底：daily_routine 是 LLM 从口语里抽的，抽错一个数字就
+# 可能变成半夜三点自己说话。采集来的数据不能直接驱动会发出声音的行为。
+PROACTIVE_QUIET_START = 21
+PROACTIVE_QUIET_END   = 7
 
 # ── TTS Emotion Mapping (STEP 4) ─────────────────────────────────────────────
 # Note: TTS emotions are "healing symmetries" to the user's emotion
