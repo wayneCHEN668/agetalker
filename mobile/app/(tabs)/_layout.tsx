@@ -61,9 +61,18 @@ export default function TabLayout() {
       <Tabs.Screen
         name="two"
         options={{
-          title: '玩游戏',
+          title: '练练脑',
           tabBarIcon: ({ color }) => (
-            <Text style={{ fontSize: 24, color }}>🎮</Text>
+            <Text style={{ fontSize: 24, color }}>🧠</Text>
+          ),
+        }}
+      />
+      <Tabs.Screen
+        name="profile"
+        options={{
+          title: '我自己',
+          tabBarIcon: ({ color }) => (
+            <Text style={{ fontSize: 24, color }}>🙋</Text>
           ),
         }}
       />

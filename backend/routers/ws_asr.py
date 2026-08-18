@@ -25,6 +25,7 @@ from config import (
     ASR_SAMPLE_RATE,
     EMOTION_MAX_DURATION_S,
     ASR_MERGE_WINDOW_MS,
+    ASR_CLOUD_MAX_RECONNECT,
 )
 
 logger = logging.getLogger(__name__)
@@ -191,6 +192,11 @@ async def _handle_cloud_session(
 
     async def on_asr_result(text: str, is_final: bool):
         """由 CloudASRBackend 桥接到 asyncio 事件循环后调用。"""
+        # 能出结果就说明云端是通的，之前那几次断连是真抖动，重建计数清零。
+        # 不清零的话，一小时对话里零星攒够 3 次抖动就会被误判成永久故障。
+        nonlocal reconnect_attempts
+        reconnect_attempts = 0
+
         if is_final and text.strip():
             buffered = aggregator.add_final(text)
             # 已攒的内容先按中间结果显示，老人能看到整句在长
@@ -217,23 +223,69 @@ async def _handle_cloud_session(
 
     # 延迟创建会话：收到第一帧音频后才调用 create_session() + start()
     session_created = False
+    # 连续重建失败次数（收到任一转写结果即清零，见 on_asr_result）
+    reconnect_attempts = 0
+    # 置位后主循环跳出，把这条 WebSocket 交给本地 FunASR 兜底
+    degrade_to_local = False
 
-    async def on_asr_disconnect():
-        """云端连接非正常断开：释放旧会话，下一帧音频到达时自动重建。
+    async def on_asr_disconnect(permanent: bool = False):
+        """云端连接非正常断开。
 
-        一小时的对话里云端会话超时/网络抖动几乎必然发生。以前这里只打一行日志，
-        结果是系统静默失聪——老人继续说话，前端毫无反应，也不知道该重来。
+        两类断连的正确处置是**相反**的：
+        - 瞬时（会话超时、网络抖动）：释放旧会话，下一帧音频到达时重建。
+          一小时的对话里这几乎必然发生，不重建就是系统静默失聪。
+        - 永久（欠费、key 失效、配额耗尽）：重建一万次也不会成功。以前这里
+          不加区分一律重建，结果是每来一帧音频重建一次的死循环——日志刷屏、
+          持续锤打云端 API，而老人那头永远停在「稍等一下」，明明可用的本地
+          FunASR 从没被启用。现在直接降级兜底。
+
+        瞬时故障连续失败 ASR_CLOUD_MAX_RECONNECT 次也按永久处理：那说明是我们
+        错误分类没覆盖到的情况，兜底比无限重试强。
         """
-        nonlocal session_created
+        nonlocal session_created, reconnect_attempts, degrade_to_local
         if not session_created:
             return
-        logger.warning(f"Cloud ASR 连接中断，将在下一帧音频到达时重建: {session_id}")
         asr_service.end_session(session_id)
         session_created = False
+
+        if not permanent:
+            reconnect_attempts += 1
+            if reconnect_attempts > ASR_CLOUD_MAX_RECONNECT:
+                logger.error(
+                    f"Cloud ASR 连续 {reconnect_attempts - 1} 次重建均失败，"
+                    f"按永久性故障处理: {session_id}"
+                )
+                permanent = True
+
+        if not permanent:
+            logger.warning(
+                f"Cloud ASR 连接中断，将在下一帧音频到达时重建 "
+                f"（第 {reconnect_attempts}/{ASR_CLOUD_MAX_RECONNECT} 次）: {session_id}"
+            )
+            try:
+                await websocket.send_text(json.dumps({
+                    "type": "status",
+                    "state": "reconnecting",
+                }))
+            except Exception:
+                pass
+            return
+
+        # ── 永久性故障：不再重试 ──
+        if asr_service.is_local_available:
+            logger.warning(f"Cloud ASR 不可用，降级到本地 FunASR: {session_id}")
+            degrade_to_local = True
+            return
+
+        # 本地也没有（ASR_BACKEND='cloud'）：只能如实告诉前端，别让老人干等
+        logger.error(
+            f"Cloud ASR 不可用且本地后端未启用，该会话无法继续识别: {session_id}"
+        )
         try:
             await websocket.send_text(json.dumps({
-                "type": "status",
-                "state": "reconnecting",
+                "type": "error",
+                "code": "ASR_UNAVAILABLE",
+                "message": "语音识别服务暂时不可用",
             }))
         except Exception:
             pass
@@ -242,13 +294,20 @@ async def _handle_cloud_session(
         frame_count = 0
         while True:
             data = await websocket.receive_bytes()
+
+            # 云端已判定不可用：跳出去把这条连接交给本地兜底。放在收帧之后是
+            # 因为循环大部分时间阻塞在 receive_bytes 上，回调置位后要等下一帧
+            # 才有机会被看见——录音期间音频是连续流，这个延迟只有一帧。
+            if degrade_to_local:
+                break
+
             frame_count += 1
-            
+
             # 第一帧收到后立即记录
             if frame_count == 1:
                 print(f">>> FIRST AUDIO FRAME: {len(data)} bytes <<<", flush=True)
                 logger.info(f"✓ Received first audio frame: {len(data)} bytes")
-            
+
             chunk = ASRService.bytes_to_float32(data)
 
             # 收到第一帧音频后才创建会话并 start()（避免 SDK 超时）
@@ -282,6 +341,12 @@ async def _handle_cloud_session(
                 # 情绪识别只需要末尾这一段
                 while sentence_samples > _MAX_SENTENCE_SAMPLES and len(sentence_audio) > 1:
                     sentence_samples -= len(sentence_audio.pop(0))
+
+        # 跳出循环只有一个原因：云端永久性故障，改用本地 FunASR 接着这条连接干。
+        # 攒了一半的云端整句丢掉——本地是「攒够一整句再批量识别」的模式，
+        # 半句残留混进去只会得到一句语义错乱的话。
+        aggregator.cancel()
+        await _handle_local_session(websocket, session_id)
 
     except WebSocketDisconnect as wd:
         print(f">>> WebSocketDisconnect: code={wd.code}, reason={wd.reason}, frames_received={frame_count} <<<", flush=True)

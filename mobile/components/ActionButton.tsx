@@ -67,10 +67,10 @@ export const ActionButton: React.FC<ActionButtonProps> = ({ isRecording, onPress
           onPressOut={handlePressOut}
           activeOpacity={1}
           accessibilityRole="button"
-          accessibilityLabel={isRecording ? '挂断' : '点击说话'}
+          accessibilityLabel={isRecording ? '挂断' : '我想和你聊聊'}
         >
           <Text style={styles.icon}>{isRecording ? '⊚' : '♪'}</Text>
-          <Text style={styles.text}>{isRecording ? '挂断' : '点击说话'}</Text>
+          <Text style={styles.text}>{isRecording ? '挂断' : '我想和你聊聊'}</Text>
         </TouchableOpacity>
       </Animated.View>
     </View>

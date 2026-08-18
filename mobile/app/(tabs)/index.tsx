@@ -4,10 +4,14 @@ import { Design } from '@/constants/Design';
 import { CATEGORY_ZH_MAP } from '@/constants/Category';
 import {
   newSessionId, SILENCE_PROMPT_MS, PROACTIVE_SCHEDULE, PROACTIVE_NO_ANSWER_MS,
+  PROACTIVE_PLAYBACK_WAIT_MAX_MS,
 } from '@/constants/Session';
+import { TTS_UNMUTE_DELAY_MS } from '@/constants/TTS';
+import { getViewMode, setViewMode as persistViewMode, DEFAULT_VIEW_MODE, ViewMode } from '@/constants/ViewMode';
 import { StatusBar } from '@/components/StatusBar';
 import { TranscriptArea } from '@/components/TranscriptArea';
 import { Waveform } from '@/components/Waveform';
+import { OrbVisualizer, derivePhase } from '@/components/OrbVisualizer';
 import { ActionButton } from '@/components/ActionButton';
 import { ErrorToast } from '@/components/ErrorToast';
 import { ConfirmDialog } from '@/components/ConfirmDialog';
@@ -23,6 +27,8 @@ export default function HomeScreen() {
   const [errorMessage, setErrorMessage] = useState('');
   const [showEndDialog, setShowEndDialog] = useState(false);
   const [isLLMStreaming, setIsLLMStreaming] = useState(false);
+  // 抽象可视化 / 对话窗口。默认抽象，首帧先按默认值渲染，读存储回来前不会闪一下再变
+  const [viewMode, setViewModeState] = useState<ViewMode>(DEFAULT_VIEW_MODE);
 
   // 跟踪流式 AI 消息在 messages 中的索引
   const streamingIndexRef = useRef<number | null>(null);
@@ -46,11 +52,14 @@ export default function HomeScreen() {
   const noAnswerTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   // 主动招呼之后，老人有没有搭话
   const proactiveAnsweredRef = useRef(false);
+  // isRecording 的 ref 镜像。定时招呼要等语音放完（十几秒）才开麦，这段时间里
+  // 闭包里的 isRecording 是陈旧的，不能拿它判断「现在是不是已经在录了」。
+  const isRecordingRef = useRef(false);
 
   // 1. TTS
   const {
     speak, stop: stopTTS, stopForBargeIn, getSpokenText, resetSpokenText,
-    isPlayingRef: ttsPlayingRef,
+    isPlaying: ttsIsPlaying, isPlayingRef: ttsPlayingRef,
   } = useTTS({
     onPlaybackDone: () => onPlaybackDoneRef.current(),
   });
@@ -246,6 +255,8 @@ export default function HomeScreen() {
     },
   });
 
+  isRecordingRef.current = isRecording;
+
   const toggleConversation = useCallback(() => {
     if (isRecording) {
       clearSilenceTimer();
@@ -373,11 +384,55 @@ export default function HomeScreen() {
   // 卸载时清掉沉默计时器
   useEffect(() => clearSilenceTimer, [clearSilenceTimer]);
 
+  // 读取上次记住的展示模式（异步存储，读回来之前先按默认值渲染）
+  useEffect(() => {
+    let cancelled = false;
+    getViewMode().then((mode) => {
+      if (!cancelled) setViewModeState(mode);
+    });
+    return () => { cancelled = true; };
+  }, []);
+
+  const toggleViewMode = useCallback(() => {
+    setViewModeState((prev) => {
+      const next: ViewMode = prev === 'orb' ? 'chat' : 'orb';
+      persistViewMode(next);
+      return next;
+    });
+  }, []);
+
+  /**
+   * 等主动招呼的语音真正放完，再多等一下让 useASR 恢复收音。
+   *
+   * 为什么必须等：useASR 在 TTS 播放期间会把麦克风帧**整帧丢掉**（防止 AI 自己
+   * 的声音被转成"用户说的话"）。这期间开麦等于开了个聋子——波形照抖（analyser
+   * 挂在丢帧判断的前面），但一帧都到不了后端，后端是「收到第一帧才创建云端 ASR
+   * 会话」，于是连会话都不会建。
+   *
+   * 为什么不能用 fetchProactive 返回当信号：它返回只代表**文字**流完了。一段
+   * 招呼 LLM 三秒吐完，CosyVoice 还要再放十几秒——这正是原来失聪的那十几秒。
+   *
+   * 末尾还要多等 TTS_UNMUTE_DELAY_MS：useASR 收到 tts-end 之后还要再等这么久
+   * （等混响散掉）才恢复收音，不等的话开麦的头几帧仍然会被丢掉。
+   *
+   * 返回 false 表示等超时了（TTS 请求挂死，播放标志再也不会翻回来）。这种情况
+   * 下静音永远解不开，开麦只会得到一个聋子——所以调用方应当直接放弃这一轮。
+   */
+  const waitForPlaybackIdle = useCallback(async () => {
+    const deadline = Date.now() + PROACTIVE_PLAYBACK_WAIT_MAX_MS;
+    while (ttsPlayingRef.current && Date.now() < deadline) {
+      await new Promise((resolve) => setTimeout(resolve, 100));
+    }
+    if (ttsPlayingRef.current) return false;
+    await new Promise((resolve) => setTimeout(resolve, TTS_UNMUTE_DELAY_MS + 100));
+    return true;
+  }, [ttsPlayingRef]);
+
   /**
    * 定时主动招呼。
    *
    * 每分钟查一次表，到点且当前没有进行中的对话就自动开一个会话、AI 先说话、
-   * 然后自动开麦。
+   * 等语音放完再自动开麦。
    *
    * 错过不补发（设计文档 §9）：App 在后台或设备休眠时错过的时间点直接跳过，
    * 否则回前台会一次性说三段话。firedHoursRef 用「日期+小时」做键，天然满足
@@ -404,7 +459,18 @@ export default function HomeScreen() {
       // 被护栏拦下（夜间静默/每日上限/连续无应答）：安静收场，什么都不做
       if (result?.blocked || !result?.fullText) return;
 
-      // 说完了自动开麦，等他搭话
+      // 语音放完之前开麦是听不见的，见 waitForPlaybackIdle 的说明。
+      // 超时说明 TTS 挂了，静音解不开——安静收场，也不上报无应答：
+      // 这次是我们自己的链路坏了，不该算在老人头上去累加放弃计数。
+      if (!await waitForPlaybackIdle()) return;
+
+      // 等的这十几秒里老人可能自己按了按钮开了对话。再开一次会把那条 WebSocket
+      // 和 MediaStream 直接冲掉（useASR.start 不做自检），旧连接的 onclose
+      // 随后又会把新会话一起停掉。
+      if (isRecordingRef.current || isEndingRef.current) return;
+
+      // 说完了自动开麦，等他搭话。无人应答的倒计时也从这一刻起算——从文字流
+      // 结束就起算的话，二十秒里有十几秒耗在放语音上，老人根本来不及应。
       start(sessionId);
       armNoAnswerTimer();
     };
@@ -412,7 +478,7 @@ export default function HomeScreen() {
     const id = setInterval(tick, 60_000);
     tick();
     return () => clearInterval(id);
-  }, [isRecording, fetchProactive, start]);
+  }, [isRecording, fetchProactive, start, waitForPlaybackIdle]);
 
   /**
    * 无人应答收场。
@@ -484,6 +550,14 @@ export default function HomeScreen() {
     : Design.colors.aura[currentEmotion as keyof typeof Design.colors.aura] ||
       Design.colors.aura.neutral;
 
+  // 抽象可视化的四态：speaking > thinking > listening > idle（TTS 播放时
+  // ASR 只是被静音，status 仍可能是 'listening'，说话态必须压过听态）
+  const orbPhase = derivePhase({
+    isPlaying: ttsIsPlaying,
+    isLLMStreaming,
+    asrStatus: status,
+  });
+
   const callCaregiver = useCallback(async () => {
     try {
       await fetch(
@@ -503,15 +577,35 @@ export default function HomeScreen() {
 
   return (
     <SafeAreaView style={[styles.container, { backgroundColor: auraColors[0] }]}>
-      <StatusBar status={status} />
-
-      <View style={styles.transcriptWrapper}>
-        <TranscriptArea messages={displayMessages} currentEmotion={currentEmotion} />
+      <View style={styles.headerRow}>
+        <StatusBar status={status} />
+        <TouchableOpacity
+          style={styles.viewModeToggle}
+          onPress={toggleViewMode}
+          accessibilityRole="button"
+          accessibilityLabel={viewMode === 'orb' ? '切换到对话文字' : '切换到抽象圆点'}
+        >
+          <Text style={styles.viewModeToggleText}>
+            {viewMode === 'orb' ? '看文字' : '看圆'}
+          </Text>
+        </TouchableOpacity>
       </View>
 
-      <View style={styles.visualizerContainer}>
-        <Waveform isActive={status === 'listening'} analyser={analyser} />
-      </View>
+      {viewMode === 'chat' ? (
+        <>
+          <View style={styles.transcriptWrapper}>
+            <TranscriptArea messages={displayMessages} currentEmotion={currentEmotion} />
+          </View>
+
+          <View style={styles.visualizerContainer}>
+            <Waveform isActive={status === 'listening'} analyser={analyser} />
+          </View>
+        </>
+      ) : (
+        <View style={styles.orbWrapper}>
+          <OrbVisualizer phase={orbPhase} analyser={analyser} auraColors={auraColors} />
+        </View>
+      )}
 
       {isCrisis && (
         <TouchableOpacity
@@ -557,6 +651,29 @@ const styles = StyleSheet.create({
   container: {
     flex: 1,
   },
+  headerRow: {
+    position: 'relative',
+  },
+  viewModeToggle: {
+    position: 'absolute',
+    right: 16,
+    top: 8,
+    minWidth: 44,
+    minHeight: 44,
+    paddingHorizontal: 14,
+    justifyContent: 'center',
+    alignItems: 'center',
+    borderRadius: 20,
+    backgroundColor: Design.colors.surface,
+    borderWidth: 1,
+    borderColor: Design.colors.outline,
+  },
+  viewModeToggleText: {
+    fontFamily: Design.typography.fontFamily,
+    fontSize: 14,
+    fontWeight: '600',
+    color: Design.colors.text.secondary,
+  },
   transcriptWrapper: {
     flex: 1,
     minHeight: 0,
@@ -565,6 +682,10 @@ const styles = StyleSheet.create({
     height: 100,
     justifyContent: 'center',
     alignItems: 'center',
+  },
+  orbWrapper: {
+    flex: 1,
+    minHeight: 0,
   },
   caregiverButton: {
     alignSelf: 'center',

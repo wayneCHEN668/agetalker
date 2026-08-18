@@ -41,10 +41,40 @@ logger = logging.getLogger(__name__)
 # 结果回调签名：async def callback(text: str, is_final: bool)
 ASRResultCallback = Callable[[str, bool], Awaitable[None]]
 
-# 断连回调签名：async def callback()
+# 断连回调签名：async def callback(permanent: bool)
 # 云端会话在长对话里会因为超时/网络抖动断开，断了必须让路由层知道去重建，
 # 否则老人还在说话、系统却已经聋了，而且前端完全看不出来。
-ASRDisconnectCallback = Callable[[], Awaitable[None]]
+#
+# permanent 区分两类断连，它们的正确处置**相反**：
+#   False（会话超时、网络抖动）→ 重建，重建会成功
+#   True （欠费、key 失效、配额耗尽）→ 重建一万次也不会成功，必须降级到本地
+# 不做这个区分的话，永久性故障会退化成「每来一帧音频重建一次」的死循环。
+ASRDisconnectCallback = Callable[[bool], Awaitable[None]]
+
+# 判定为永久性故障的 DashScope 错误码（小写子串匹配，容忍 SDK 措辞变化）。
+# 共同点：都不是重试能解决的，需要人去改账户/密钥/配额。
+_PERMANENT_ERROR_MARKERS = (
+    'arrearage',        # 账户欠费
+    'invalidapikey',    # API key 无效
+    'invalid_api_key',
+    'unauthorized',     # 未授权
+    'accessdenied',     # 拒绝访问
+    'access denied',
+    'forbidden',
+    'quota',            # 配额耗尽（当次会话内不会恢复）
+    'modelnotexist',    # 模型不存在/无权限
+    'invalidparameter', # 请求本身有问题，重发同样的请求没有意义
+)
+
+
+def _is_permanent_error(code: object, message: object) -> bool:
+    """判断这次云端错误是否重试也无用。
+
+    宁可判「瞬时」也不要误判「永久」：判错成瞬时最多多重试几次（有次数上限兜底），
+    判错成永久会让本来能自愈的抖动直接掉到本地模型上，识别质量下降。
+    """
+    haystack = f"{code} {message}".lower()
+    return any(marker in haystack for marker in _PERMANENT_ERROR_MARKERS)
 
 
 # ─── 云端 ASR 后端 ────────────────────────────────────────────────────────────
@@ -178,12 +208,14 @@ class _RecognitionCallbackAdapter(RecognitionCallback):
         """标记为正常关闭，后续的 on_close/on_error 不再触发重建。"""
         self._active = False
 
-    def _signal_disconnect(self) -> None:
+    def _signal_disconnect(self, permanent: bool = False) -> None:
         """把断连事件从 SDK 线程投递到 asyncio 事件循环。"""
         if not self._active or self._disconnect_callback is None:
             return
         self._active = False   # 只触发一次，避免 error + close 连发导致重复重建
-        asyncio.run_coroutine_threadsafe(self._disconnect_callback(), self._loop)
+        asyncio.run_coroutine_threadsafe(
+            self._disconnect_callback(permanent), self._loop,
+        )
 
     def on_open(self) -> None:
         logger.debug(f"Cloud ASR 连接已打开: {self._session_id}")
@@ -204,14 +236,20 @@ class _RecognitionCallbackAdapter(RecognitionCallback):
 
     def on_error(self, result) -> None:
         msg = getattr(result, 'message', str(result))
-        logger.error(f"Cloud ASR 错误 ({self._session_id}): {msg}")
-        self._signal_disconnect()
+        code = getattr(result, 'code', None)
+        permanent = _is_permanent_error(code, msg)
+        logger.error(
+            f"Cloud ASR 错误 ({self._session_id}): [{code}] {msg}"
+            f"{' —— 永久性故障，不再重试' if permanent else ''}"
+        )
+        self._signal_disconnect(permanent)
 
     def on_close(self) -> None:
         logger.debug(f"Cloud ASR 连接已关闭: {self._session_id}")
         # 走到这里而 _active 仍为 True，说明不是我们主动停的（会话超时、
-        # 网络断开等），需要重建
-        self._signal_disconnect()
+        # 网络断开等），需要重建。单纯的 close 一律当瞬时处理：真正的永久性
+        # 故障会先走 on_error，那条路径已经把 _active 置 False 了。
+        self._signal_disconnect(permanent=False)
 
 
 # ─── 本地 ASR 后端 ────────────────────────────────────────────────────────────
@@ -401,3 +439,8 @@ class ASRService:
     def is_cloud_active(self) -> bool:
         """当前是否有云端后端可用（初始化时）。"""
         return self.cloud is not None
+
+    @property
+    def is_local_available(self) -> bool:
+        """本地 FunASR 是否可用。云端中途失败时决定能否降级兜底。"""
+        return self.local is not None

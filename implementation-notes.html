@@ -320,7 +320,364 @@ AI 编的话会被摘要吸收成「聊过的事」，之后每轮作为事实�
 AI 动不动把话说到一半停掉，比不能打断更糟。</p>
 </div>
 
-<h2>10. 后续可做的事</h2>
+<h2>10. 危机轮编人（第三轮实机测试）</h2>
+
+<div class="card warn">
+<h4>10.1 危机轮回了「叫你女儿来」「护工小陈」，两个人都不存在 <span class="tag">严重</span></h4>
+<p>实机对话里 AI 在危机轮回复：「咱们一起打个电话，叫你女儿来陪陪你，好不好？
+或者，我帮你把护工小陈叫过来，就现在？」老人的回应是：<em>我从没说过我有个女儿，
+也没说过护工小陈，我可能就是居家养老。</em></p>
+
+<p>查证：<code>data/profiles/</code> 里该老人只有三个字段有值（称呼=王爷爷、听力=好、
+慢病=心脏病），<code>emergency_contact</code> / <code>location</code> /
+<code>room_number</code> 全是 <code>unknown</code>；<code>data/memory/</code> 里搜
+「女儿|护工|儿子|家属」零命中。两个人连同名字都是凭空生成的。</p>
+
+<p><strong>这是 9.1 那一类问题的危机路径变种，而 9.1 的修复没有覆盖到这里。</strong>
+两处成因叠加：</p>
+<ul>
+<li><code>CRISIS_SYSTEM_PROMPT</code> 硬性要求「最后建议联系家人或护工，<strong>给个
+    具体的下一步</strong>」——直接点名了两种关系，还要求说具体的；</li>
+<li><code>build_crisis_prompt()</code> 是零参数签名。常规路径注入了
+    memory / profile / summary，<strong>唯独危机路径一个事实都拿不到</strong>，
+    9.1 加的那整段事实红线也只在 <code>NORMAL_SYSTEM_PROMPT</code> 里。</li>
+</ul>
+<p>被要求说具体的，手上又无事可依，编是必然结果而不是偶发。而危机轮恰恰是最不能
+编的一轮：这一轮的全部目的是让他相信有人在听，编出来的「你女儿」一旦对不上，
+证明的正好是反面。</p>
+
+<p><strong>修复：</strong></p>
+<ol>
+<li><code>build_crisis_prompt(profile_context, emergency_contact)</code> —— 注入画像，
+    并把事实红线补进危机 prompt（此前只有常规路径有）。</li>
+<li>「建议联系家人或护工，给个具体的下一步」改成条件式
+    （<code>build_crisis_contact_block()</code>）：<br>
+    · <strong>知道联系人</strong> → 只说记录里的那一个人，不许换称呼；<br>
+    · <strong>不知道</strong> → 不许说出任何具体的人，只能反过来问他，让他自己说出
+    那个人是谁：「你身边现在有人陪你吗？我叫人给你打个电话好不好？」他说出谁就
+    顺着谁接下去。</li>
+<li><code>CRISIS_VIGILANCE_SECTION</code> 里同样的一句「轻轻带一句身边有人可以陪他
+    （家里人或者护工）」改成问句，不再替他指定关系。</li>
+<li><code>emergency_contact</code> 是 EXTERNAL 字段，不在 <code>render_profile()</code>
+    渲染范围内，所以新增 <code>render_emergency_contact()</code> /
+    <code>ProfileService.get_emergency_contact()</code> 单独读一次。</li>
+<li>危机告警事件补上 <code>elder_id</code>。AI 不知道联系人时不许编，兜底就落在
+    这条告警上——而原来的事件只有 <code>session_id</code>，管理端拿到一个查不到人
+    的会话号，根本联系不上老人。</li>
+</ol>
+<p>另外刻意<strong>禁止 AI 向老人承诺「我已经通知谁了」</strong>：告警只保证事件被写出去，
+不保证有人到场；承诺了没兑现比没说更伤人。</p>
+<p>回归锁在 <code>selftest/test_crisis_prompt.py</code>（12 条）。</p>
+</div>
+
+<div class="card">
+<h4>10.2 顺带暴露的：整套 schema 默认了机构场景</h4>
+<p>老人那句「我可能就是居家养老」指出了一个没被验证过的前提——
+<code>room_number</code>、「护工」这些默认系统跑在养老院里。<code>location</code>
+字段是存在的，但标为 EXTERNAL（本期只占位、不会通过对话采集），
+所以它<strong>永远是空的，而 prompt 已经按机构场景在写话了</strong>。</p>
+<p>本次只在危机路径上按「不知道就不说」处理，没有改 schema。真要支持居家场景，
+<code>location</code> 需要有实际的录入或采集途径，否则这个假设会在别处再冒出来。</p>
+</div>
+
+<h2>11. 事实红线自己的两个漏洞（第四轮实机测试）</h2>
+
+<div class="card warn">
+<h4>11.1 编造从「陈述句」转移到了「问句尾巴上」 <span class="tag">严重</span></h4>
+<p>老人说「今天早晨还没吃饭呢」，AI 回：「……要不要我陪你煮碗热乎的面？就放点青菜，
+再卧个蛋——<strong>像小时候小华来串门，你妈总这么给他做</strong>。」</p>
+<p>查证：小华<em>确实</em>在台账里（小伙伴、已故、「经常一起玩」）。但「来串门」
+「你妈」「总这么给他做」台账里一个字都没有。</p>
+
+<p><strong>关键区别：这一轮走的是常规路径，9.1 加的那整段事实红线是在场的，没拦住。</strong>
+所以问题不在"某条路径漏了红线"（那是 10.1），而在红线本身。两个洞：</p>
+
+<ol>
+<li><strong>疑问句漏洞。</strong>红线原文把规则写成「陈述句只能复述……只能用提问的方式
+    邀请对方自己讲……<em>提问可以带猜测语气，陈述句不行</em>」。判断标准被写成了
+    <strong>句式</strong>。模型于是照做了——把编的内容挂在「要不要我……？」这个问句
+    的尾巴上、破折号后面带出来。形式上是问句，内容上是断言。规则被满足了，
+    幻觉照样出去了。</li>
+<li><strong>自查是实体级，不是命题级。</strong>原文让它自查「人名、称呼、地点、时间、
+    数字或事件」的来源。「小华」一查，<em>确实在台账里</em> → 放行。而"来串门"
+    "你妈煮面"既不是人名也不是数字，压根不触发自查。
+    <strong>台账里有这个人，被当成了台账里有这件事。</strong>
+    台账 notes 又都是「经常一起玩」这种三五个字的碎片，留白极大，模型顺手就补满了。</li>
+</ol>
+
+<p><strong>修复</strong>（<code>NORMAL_SYSTEM_PROMPT</code> 与危机 prompt 的事实红线同步改）：</p>
+<ul>
+<li>判断标准从"句式"改成"<strong>这句话有没有断言一件事</strong>"，并写死
+    「<strong>问句不是免罪符</strong>」——挂在「要不要……？」后面、破折号后面补的
+    半句，和独立陈述句是一回事。</li>
+<li>自查从过名字改成<strong>逐条过说法</strong>（谁、做过什么、什么时候、什么样子），
+    并写死「<strong>台账里有这个人 ≠ 台账里有这件事</strong>」「台账那几条短记录，
+    写着什么就只有什么，没写的部分不是留给你补的」。</li>
+<li>把现场翻车那一句作为反面例子写进举例区——抽象规则已经证明拦不住。
+    <strong>例子里的名字换成了虚构的老王</strong>，沿用 9.1 那个「这是另外一段对话，
+    一个字都不许搬进来」的警告外壳；直接把真实的「小华」写进 prompt 会重演
+    9.1 的 few-shot 内容泄漏。</li>
+</ul>
+<p>回归锁在 <code>selftest/test_fact_guardrail.py</code>（6 条），其中一条专门断言
+反面例子必须带「不好」标记，防止它自己变成 few-shot 素材。</p>
+</div>
+
+<div class="card warn">
+<h4>11.2 AI 提出了它根本做不到的事 <span class="tag">严重</span></h4>
+<p>同一句里的另一处：「<strong>要不要我陪你煮碗热乎的面？就放点青菜，再卧个蛋</strong>」
+——蘅小年是个语音陪伴程序，它不能煮面、不能到场、不能递任何东西。</p>
+<p>查证结果：<strong>四个 prompt（normal / crisis / closing / proactive）里没有任何一处
+说明它的能力边界</strong>——没有一句话告诉模型它做不了物理动作，所以这类越界完全
+不受约束。10.1 修掉的「我帮你把护工小陈叫过来」是同一类问题的另一半：那次修的是
+<em>编出不存在的人</em>，这次修的是<em>编出做不到的动作</em>。</p>
+<p>系统真正能做的动作只有两个：写危机/求助告警给管理端（<code>_write_event</code>），
+和在设定时间主动开口（proactive）。除此之外一律做不到。</p>
+
+<p><strong>修复方式（已确认）：不禁止一切提议，改主语。</strong>提议他自己动一动
+（行为激活）临床上对食欲下降和抑郁是有效的，值得保留；不能保留的是"AI 去做"。
+新增 <code>CAPABILITY_SECTION</code>，normal 与 proactive 两条路径共用一份
+（避免两边各写一版后漂移，与 <code>CRISIS_KEYWORDS</code> 的做法一致）：</p>
+<ul>
+<li>「你是个陪他说话的声音，<strong>做不了任何实际的事</strong>」+ 正反例
+    （不好：「要不要我陪你煮碗面？」／好：「要不要去厨房下碗热汤面？」）；</li>
+<li>提议只能是提议、不能是催，他说不想就顺着，别劝第二遍。</li>
+</ul>
+
+<p><strong>附带堵上的门槛（本次自行加的）：</strong>「提议他自己去做」这个方向有个
+前提没人验证过——<strong>他站不站得起来</strong>。<code>mobility</code> 字段
+（「腿脚方便不方便」）是 ASKABLE，但目前<em>默认是空的</em>。对一个起不来的人说
+「要不要去厨房下碗面」，比什么都不说伤人得多。所以 <code>CAPABILITY_SECTION</code>
+里写死：<strong>画像里没写腿脚，就不许提任何需要走动的事</strong>（下厨、出门、
+下楼），这时只说话、不提事。</p>
+<p>回归锁在 <code>selftest/test_capability_boundary.py</code>（6 条）。</p>
+</div>
+
+<h2>12. 定时主动招呼开的是一个聋麦（第五轮实机测试）</h2>
+
+<div class="card warn">
+<h4>12.1 招呼说完之后就再也听不见了 <span class="tag">严重</span></h4>
+<p>现象：AI 主动开口之后，波形照抖，<strong>一个字的转录都没有</strong>。</p>
+
+<p>不是"听不清"，是<strong>每一帧都被前端主动丢掉了</strong>。
+<code>useASR</code> 的回声消除是个全局互斥标志：TTS 一开始播就把
+<code>isTTSMutedRef</code> 置真，置真期间 <code>onaudioprocess</code> 直接 return
+不发帧。而 <code>analyser</code> 挂在这个判断的<strong>前面</strong>，所以波形照抖
+——波形抖动只证明采集在跑，不证明数据在发。</p>
+
+<p>根因在开麦的<strong>时机</strong>：定时招呼那条路径写的是
+<code>await fetchProactive(...)</code> 之后立刻 <code>start()</code>。但
+<code>fetchProactive</code> 返回只代表 <strong>SSE 文字流</strong>结束了，不代表
+语音放完了——这个区别在 <code>doEndSession</code> 的注释里早就写明白过
+（「fetchClosing 返回只代表<em>文字</em>流完了，语音通常还在后台排队播」），
+但主动招呼这条路径没照做。一段 60 字的招呼，LLM 三秒吐完，CosyVoice 要放
+十三到十五秒。于是：</p>
+<ul>
+<li><strong>t≈3s</strong> 开麦，但静音标志还是真 → 帧全丢。后端是「收到第一帧才
+    <code>create_session()</code>」，所以<strong>云端 ASR 会话根本没被创建过</strong>；</li>
+<li><strong>t≈15s</strong> 语音放完，<code>tts-end</code> + 200ms 才解除静音；</li>
+<li><strong>t=23s</strong> 无人应答计时器到点 → <code>stopASR()</code>、清屏、
+    上报 <code>answered=false</code>。</li>
+</ul>
+<p>真正能听见的窗口只剩 ≈7 秒，还要在里面说完整句 + 云端 VAD 出 final +
+熬过 1400ms 的合并窗口。老人反应慢两秒就彻底没戏，连吃两次就触发
+<code>PROACTIVE_NO_ANSWER_GIVEUP</code>，当天不再开口。</p>
+
+<p><strong>修复：</strong>新增 <code>waitForPlaybackIdle()</code>，轮询
+<code>ttsPlayingRef</code> 等语音真正放完，再多等
+<code>TTS_UNMUTE_DELAY_MS</code>（+100ms 余量）让 useASR 恢复收音，然后才
+<code>start()</code>。无人应答倒计时也跟着挪到这一刻起算——从文字流结束起算的话，
+二十秒里有十几秒耗在放语音上。</p>
+
+<p><strong>顺带堵上的两处（都是这次改动自己带出来的）：</strong></p>
+<ul>
+<li><strong>等待期间老人自己按了按钮。</strong>窗口从 3 秒拉长到十几秒之后这变得
+    很可能——AI 刚跟他打完招呼，他伸手去按是最自然的反应。再 <code>start()</code>
+    一次会把那条 WebSocket 和 MediaStream 直接冲掉（<code>useASR.start</code>
+    不做自检），旧连接的 <code>onclose</code> 随后又会把新会话一起停掉。
+    加了 <code>isRecordingRef</code>（<code>isRecording</code> 的 ref 镜像，
+    闭包里的 state 是陈旧的）在开麦前再查一次。</li>
+<li><strong>等待超时。</strong>TTS 请求挂死时 <code>isPlayingRef</code> 永远不会翻回来，
+    不能无限等。<code>waitForPlaybackIdle</code> 返回 false 表示超时，此时静音
+    永远解不开，开麦只会再得到一个聋子——直接放弃这一轮。<strong>不上报无应答</strong>：
+    这次是我们自己的链路坏了，不该算在老人头上去累加放弃计数。</li>
+</ul>
+
+<p><strong>200ms 那个数搬了家。</strong>原来写死在 <code>useASR</code> 里，现在两处要用
+同一个值（解除静音的延时 / 开麦前要等多久），提到
+<code>constants/TTS.ts</code> 的 <code>TTS_UNMUTE_DELAY_MS</code>，
+各写一个字面量迟早会对不上。</p>
+</div>
+
+<div class="card">
+<h4>12.2 顺带查清、但<strong>没有</strong>改的两处</h4>
+<ul>
+<li><strong>会话内的沉默唤起不受影响。</strong>那条路径麦克风本来就开着、后端会话
+    已建、<code>ASR_CLOUD_HEARTBEAT=True</code> 保着连接，播完解除静音就恢复了。
+    TTS 期间听不见是<em>设计如此</em>（防自问自答），不是缺陷。坏的只有定时招呼
+    这一条——因为只有它自己开麦。</li>
+<li><strong>打断检测的底噪基线在这条路径下是坏的，但修完 12.1 之后它够不着了。</strong>
+    <code>resetBargeInState()</code> 是在 <code>tts-start</code> 时调的，那时麦克风
+    还没开，<code>BASELINE_MS</code> 那 300ms 一个样本都采不到，阈值退化成写死的
+    <code>MIN_THRESHOLD_RMS = 0.02</code>，完全没有自适应。原本指望它把静音期里
+    开口的老人捞回来，实际捞不住（安静房间里轻声说话过不了 0.02）。
+    12.1 修完之后 <code>start()</code> 的两个调用点都保证麦克风开的时候不在静音态
+    （<code>toggleConversation</code> 先调 <code>stopTTS()</code>，定时招呼等到播完），
+    这个退化路径已经<strong>不可达</strong>——所以<em>没有</em>为它加防御代码。
+    但它是个真实存在的陷阱：以后再加任何「TTS 播放期间开麦」的路径，
+    基线必须重采，否则打断会静默失灵。</li>
+</ul>
+</div>
+
+<h2>13. 编造感知 + 时间全丢（第六轮实机测试）</h2>
+
+<div class="card warn">
+<h4>13.1 它描述了它看不见的东西 <span class="tag">严重</span></h4>
+<p>现场（主动招呼）：「<strong>刚才您望着门口那会儿，我瞧见窗台上的光挪了半寸</strong>」
+「<strong>今儿风软</strong>」。蘅小年只有麦克风——看不见他、看不见窗台、没有天气数据。</p>
+
+<p>这是 §10.1（编出不存在的人）、§11.2（编出做不到的动作）之后的<strong>第三块</strong>：
+编出感知不到的观察。<code>CAPABILITY_SECTION</code> 管的是"做不了的<em>动作</em>"，
+一个字都没管"感知不到的<em>东西</em>"。</p>
+
+<p>更糟的是<strong>prompt 自己教的</strong>：主动开口硬规则第 3 条原文写着
+「什么都没记着，就说点眼前的（<strong>天气</strong>、时候）」——「今儿风软」
+就是这句直接教出来的。</p>
+
+<p><strong>修复：</strong><code>CAPABILITY_SECTION</code> 新增「你能感知到什么、
+感知不到什么」一节，配正反例（不好：「我瞧见窗台上的光」；好：「刚才安静了一会儿」
+——静默是它真测得到的）。硬规则第 3 条删掉「天气」，<strong>保留「时候」</strong>
+——因为 13.2 把当前时间真的给了它，时候从此是它知道的事。</p>
+
+<p><strong>已确认的外溢：</strong><code>CAPABILITY_SECTION</code> 是 normal 与
+proactive 共用的一份，所以感知边界同时约束了普通对话轮。这是有意的——
+normal 路径同样不该说「我看您脸色不好」。</p>
+
+<p>另加硬规则第 4 条：<strong>提以前的事必须说清那是以前的</strong>（「上回您说」），
+不许写成此刻正在发生的景象。这治的是「像小时候小华他们跑过墙根，影子一跳一跳的」
+——把台账里的回忆焊到当下，制造出一种它并不在场的亲密感。</p>
+</div>
+
+<div class="card warn">
+<h4>13.2 今天以前的事，全被当成刚刚发生 <span class="tag">严重</span></h4>
+<p>时间信息在<strong>三层</strong>上全丢了：对话历史条目只有
+<code>{role, content}</code>；台账<em>存了</em> <code>last_mentioned</code> 但
+<code>render_ledger</code> 渲染时整个扔掉；四个 prompt 没有一处说今天是几号。</p>
+
+<p><strong>实盘台账里的现成证据：</strong></p>
+<pre>小华 [已故]：…老人今天才知道小华去世了     last_mentioned: 2026-08-13</pre>
+<p>这条 note 的<strong>文本里</strong>写着「今天」，是 8 月 13 日写下的。模型每天
+读到的都是「今天」——<strong>小华于是连着好几天都是今天死的</strong>。所以这不只是
+渲染层缺日期：相对时间词已经被<em>固化进存储内容本身</em>，光加日期前缀救不回旧条目。</p>
+
+<p><strong>修复分三处：</strong></p>
+<ul>
+<li><code>build_now_block()</code>：注入 normal / crisis / closing / proactive 四个
+    prompt。钟点走 12 小时制——这段话是要被念出来的，没人讲「下午13点」。</li>
+<li><code>render_ledger</code>：每条加 <code>〔8月13日〕</code> 前缀（数据本来就有），
+    跨年的条目补年份。<strong>同时在台账块开头加一句兑冲说明</strong>：
+    「条目内容里出现的『今天』指的是记下它的那一天，不是现在」。
+    <strong>这句是关键</strong>——光加前缀模型不会自己去做这个换算，旧条目已经
+    写死改不动了，只能靠这句兜住。</li>
+<li><code>EXTRACT_SYSTEM_PROMPT</code>：禁止 note 里再出现「今天/昨天/刚才/最近」
+    这类词。堵住新数据继续被同样的方式污染。老人自己说的绝对说法
+    （「走了三年了」）可以留——那是他的话，不是抽取模块添的。</li>
+</ul>
+<p><strong>已确认：旧台账不清洗</strong>，靠日期前缀 + 兑冲说明兑。</p>
+<p>回归锁在 <code>selftest/test_time_labels.py</code>（10 条）与
+<code>test_capability_boundary.py</code> 新增的 4 条，全部离线可跑。</p>
+</div>
+
+<div class="card">
+<h4>13.3 查清了但<strong>没有</strong>改的</h4>
+<ul>
+<li><strong>采集本来就接进主动开口了。</strong>一开始以为"按缺失字段主动了解"
+    这套没做，查下来 <code>plan_elicitation</code> 在主动开口路径里是被调用的
+    （<code>llm_service.py</code>）。那两段失真的招呼都是 <code>silence</code> 触发，
+    而 silence 走的是会话内类别（当时是 grief），<code>_SAFE_CATEGORIES</code>
+    只放 neutral/positive 过——所以采集被<em>故意</em>抑制了。哀伤叙事中途开新话题
+    就是打断，这条抑制有临床理由，<strong>已确认不动</strong>。</li>
+<li><strong>台账在按字面串去重，同一个人裂成多条。</strong>实盘里
+    小华／小黄（后者几乎肯定是 ASR 把"小华"转错）、王叔叔／王爷爷、
+    老伴／老伴儿，三组六条其实是三个人。<code>_merge_person</code> 用 name 精确
+    匹配，转写差一个字就新建条目。是真问题，不在本轮范围。</li>
+<li><strong>会话内对话历史仍然没有时间戳。</strong>单次会话里各轮相隔几分钟，
+    加了是噪音；真正出事的是跨会话的台账，已由 13.2 覆盖。</li>
+</ul>
+</div>
+
+<h2>14. 「我自己」：老人自己看、自己改的画像页</h2>
+
+<div class="card">
+<h4>14.1 范围：只开放 13 个 askable 字段 <span class="tag">已确认</span></h4>
+<p>底部第二栏「玩游戏」改成「练练脑」（<code>two.tsx</code> 至今还是 Expo 脚手架
+原样，所以这一步只是改标签和图标），右边新增第三栏「我自己」。</p>
+
+<p>画像一共 22 个字段，这一页<strong>只列 13 个 askable</strong>：</p>
+<ul>
+<li><strong>不列 external</strong>（紧急联系人 / 药名 / 房间号）——设计上就是护理员
+    录的，AI 不问。这一页在老人随手能点到的底部栏里，不该同时装着这些。</li>
+<li><strong>不列 observable</strong>（话多话少 / 情绪底色 / 能聊多久）——系统从对话
+    行为统计出来的，给个能改的入口，下一轮 <code>observe_behavior</code> 就把
+    老人改的值盖掉了，等于骗他白改一次。</li>
+</ul>
+<p>门槛写在 <code>ProfileService.set_slot_manually</code> 里（<code>is_askable</code>
+一关挡掉其余九个），不在路由层——路由只做搬运。</p>
+</div>
+
+<div class="card warn">
+<h4>14.2 两处没写进需求、但必须有的</h4>
+
+<p><strong>（一）清空。</strong>实盘画像里 <code>address</code> 的值是
+<strong>「我」</strong>——从 AI 自己那句「我该怎么称呼你呀？」里抽错的
+（evidence 字段留着原句，一看就知道）。一个改不掉错值的编辑页没有意义。
+所以 <code>set_slot_manually</code> 收空串表示清掉：回到 <code>unknown</code>，
+<code>needs_attention</code> 重新为真，AI 以后会再问一次——等于把这一栏交还给
+对话去采。</p>
+<p>清的时候 <strong>evidence / source / confidence 一起清</strong>。只清 value 会
+留下旧依据，下一次抽取拿它当上下文，等于没清干净。</p>
+
+<p><strong>（二）岁数的输入。</strong><code>set_birth_year</code> 只收四位年份，
+并且明确拒绝年龄（「存年龄一年后就是错的，而且没有任何机制会发现它错了」）。
+但这一栏对老人显示的标签是<strong>「岁数」</strong>，他一定会输 83，然后被静默拒绝。</p>
+<p>处理方式是在写入口加 <code>_year_from_age_or_year()</code>：
+<code>1900~今年</code> 当年份，<code>40~120</code> 当岁数换算成出生年，两个区间不
+重叠所以没有歧义，都不像就原样交给 <code>set_birth_year</code> 去拒。
+<strong>schema 一个字没动</strong>——存的仍然只有四位年份，年龄照旧由
+<code>compute_age()</code> 每次读时算。</p>
+</div>
+
+<div class="card">
+<h4>14.3 前端的三条取舍</h4>
+<ul>
+<li><strong>一行一个字段，行高 ≥72。</strong>手抖也点得中。</li>
+<li><strong>没填的写「还没说」，不留白。</strong>留白在老人眼里像是坏了。</li>
+<li><strong>编辑用整屏浮层，不做行内输入框。</strong>行内框在小屏上会被弹出的
+    键盘顶掉，老人看不见自己正在改哪一栏。</li>
+</ul>
+<p>被拒的写入（目前只有岁数）不会把人关在浮层里干等——直接说「这个岁数看着
+不太对，您再看看？」，留在原地让他改。</p>
+</div>
+
+<div class="card warn">
+<h4>14.4 撞上的一处：<code>getElderId()</code> 中途变成异步了</h4>
+<p>写这一页的时候 <code>constants/Session.ts</code> 的 <code>getElderId()</code> 已经
+从同步改成 <code>async</code>（原生端改走 AsyncStorage，否则打包后每次冷启动都退到
+<code>FALLBACK_ELDER_ID</code>，多台设备共享同一份记忆）。<code>tsc</code> 当场抓到了。</p>
+<p>照 <code>useLLM</code> 已有的做法处理：<strong>惰性 ref 缓存 Promise 本身</strong>，
+不缓存 resolve 后的值——不管哪个调用先发起请求，都等同一次读取结果，
+不会在 AsyncStorage 还没返回时就把默认值发出去。</p>
+</div>
+
+<div class="card">
+<h4>14.5 验证</h4>
+<p><code>selftest/test_profile_api.py</code>（14 条，离线可跑）：只回 askable、
+按优先级排序、中文标签、空值形态、手工写入落盘、覆盖抽错的值、非 askable 被拒、
+清空回 unknown 且清掉 evidence、岁数三种输入。后端全量 248 条通过。</p>
+<p>前端只有 <code>tsc --noEmit</code>（<code>mobile/</code> 至今没有 JS 测试框架），
+页面本身<strong>需要实机点一遍</strong>。</p>
+</div>
+
+<h2>15. 后续可做的事</h2>
 <ul>
 <li><strong>台账迁移到加密数据库</strong>（已确认的方向）。届时只需替换
     <code>MemoryService._load</code> / <code>_save</code> 两个方法，
@@ -333,6 +690,8 @@ AI 动不动把话说到一半停掉，比不能打断更糟。</p>
     发现新增的就重新生成。需要额外一次调用或本地 NER，成本不低。</li>
 <li><strong>打断阈值实测调参</strong>（见 9.5）与 <strong>合并窗口实测调参</strong>（见 9.2），
     两者都只能在真实房间/真人对话里定。</li>
+<li><strong><code>location</code> 的录入途径</strong>（见 10.2）：居家 / 机构这个前提
+    目前没有任何来源，空着就等于默认机构。</li>
 <li><strong>幻觉的历史放大效应</strong>：一旦某轮编造进了对话历史，
     后续几轮会把它当既成事实继续引用，越滚越实。目前只能靠重开会话清除，
     没有自动检测机制。</li>
