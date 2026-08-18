@@ -28,6 +28,8 @@ dist/
 
 # 运行时产生的老人个人数据（家庭关系、亲人离世、健康状况等），绝不入库
 backend/data/memory/
+backend/data/crisis_events/
+backend/data/profiles/
 
 # IDEs
 .qoder/
