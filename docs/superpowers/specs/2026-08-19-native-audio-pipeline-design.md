@@ -47,7 +47,8 @@ if (Platform.OS !== 'web') {
 - **完整复制现有 web 端行为**，包括：
   - 逐帧 RMS 自适应打断检测（底噪采样 → 算阈值 → 连续帧判定 → 补发预缓冲）
   - 打断时按实际播放进度精确截断对话历史（`getSpokenText`）
-- web 端不退步
+- ~~web 端不退步~~ **（2026-08-19 实现期间修订，见 §4.1a）**：web 端**放音**不退步；
+  web 端**录音**放弃维护，接受不可用——见下方修订说明
 
 ### 非目标
 
@@ -74,7 +75,7 @@ if (Platform.OS !== 'web') {
 - 支持 RN 0.81（本项目版本）与 New Architecture（本项目 `newArchEnabled: true`）
 - 提供 Expo config plugin，契合本项目已在用的 prebuild 流程
 - **web 端同样可用**：官方文档明确「在 web 上库会转而使用浏览器内建的
-  Web Audio API」
+  Web Audio API」——**⚠️ 2026-08-19 实现期间证伪，仅对放音成立，见 §4.1a**
 
 ### 落选方案
 
@@ -97,6 +98,33 @@ if (Platform.OS !== 'web') {
   web 上调好的打断参数在原生上对不上，最终要调两遍、且永远无法确认两边一致
 
 这是本设计中最重要的一个取舍。
+
+### 4.1a 修订（2026-08-19，Task 4 实现期间）：「两端统一」对录音不成立
+
+Task 4 实现时发现 §3「已核实的关键事实」里"web 端同样可用"这条**只对放音成立，
+对录音不成立**：`react-native-audio-api` v0.13.3（npm `latest`，无更新的稳定版）
+的 web 构建**完全没有 `AudioRecorder`**（录音相关的类/API 整个缺失），三种独立方式
+验证（源码 `src/api.web.ts`、编译产物 `lib/module/api.web.js`、清缓存后的真实构建）。
+不仅是运行时拿不到——`useASR.ts` 一 import 这个库，web 端 bundle 直接**编译不过**：
+库的 web 入口无条件引入自带的音频控件 UI 组件，该组件依赖 `react-native-gesture-handler`，
+项目未装此包。
+
+`AudioContext` / `AudioBufferSourceNode` / `AnalyserNode`（放音与可视化用到的一切）
+在 web 构建里确认存在，不受影响——`useTTS.ts`（Task 5）和 Waveform/Orb 的可视化
+不需要改动本节结论。
+
+**修订后的决定**（已与需求方确认）：接受 web 端录音不可用，不再维护 web 端录音路径。
+`useASR.ts` 直接、无条件使用 `AudioRecorder`，不为录音后端选型保留
+`Platform.OS` 分支——录音功能上 web 就是不可用，而不是"两条路径都维护但表现不同"。
+`react-native-gesture-handler` 补装以修掉编译期错误（不装的话连聊天页、练练脑、
+我自己三个 tab 的 web 版全部起不来，不止是录音这一个功能受影响）。
+
+`AudioContext` / `AnalyserNode` 这些放音与可视化相关的 API 仍按原计划统一。
+"两端统一"这个设计原则**降级为"放音统一，录音各自实现"**，不是完全废弃。
+
+对 §7 验证方式的影响：web 端手测清单里涉及"说话出字""插话打断"的项目
+无法在 web 端验证（`AudioRecorder` 在 web 上不存在，点击开始录音不会有任何反应）。
+这部分验证整体后移到 §7.3 的 Android 真机测试。
 
 ### 4.2 对外接口保持不变
 
@@ -194,11 +222,16 @@ AudioRecorder.onAudioReady(16kHz / 2048 / mono)
 
 `npx expo start --web`，逐项确认：
 
-- [ ] 按「我想和你聊聊」能开始录音，说话出字
-- [ ] AI 回复能出声，多句之间无卡顿
-- [ ] AI 说话时插话，能打断，且屏幕文字截断在实际听到的位置
-- [ ] 「结束对话」能播完告别再清屏
-- [ ] Waveform / Orb 随声音起伏
+- [ ] 三个 tab（聊聊天/练练脑/我自己）都能正常打开，bundle 编译无报错
+      （§4.1a 修订后新增项：验证 `react-native-gesture-handler` 补装解决了编译期失败）
+- ~~按「我想和你聊聊」能开始录音，说话出字~~ **不适用（§4.1a）**：`AudioRecorder`
+  在 web 构建里不存在，点击开始录音不会有任何反应，这是已接受的行为，不是缺陷
+- [ ] AI 回复能出声，多句之间无卡顿（放音不受 §4.1a 影响，仍需验证）
+- ~~AI 说话时插话，能打断~~ **不适用（§4.1a）**：打断依赖录音侧的打断检测，
+  web 端录音不可用，此项移至 §7.3 Android 验证
+- [ ] 「结束对话」能播完告别再清屏（不依赖录音，仍需验证）
+- [ ] Waveform / Orb 随声音起伏（TTS 播放时的可视化不依赖录音，仍需验证；
+      录音时的可视化不适用）
 
 ### 7.3 Android 手动验证
 
