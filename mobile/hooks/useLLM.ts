@@ -1,6 +1,7 @@
 import { useState, useCallback, useRef } from 'react';
 import { TTSParams } from '../constants/TTS';
 import { getElderId } from '../constants/Session';
+import { API_BASE_URL } from '../constants/Api';
 
 interface UseLLMOptions {
   baseUrl?: string;
@@ -34,7 +35,7 @@ const takeCompleteSentences = (buffer: string): { ready: string; rest: string } 
 
 export const useLLM = (options: UseLLMOptions = {}) => {
   const {
-    baseUrl = 'http://localhost:8050',
+    baseUrl = API_BASE_URL,
     onSentence,
     onDelta,
     onDone,

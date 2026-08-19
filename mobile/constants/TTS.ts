@@ -7,6 +7,8 @@
  * of truth for healing-symmetry parameter selection.
  */
 
+import { API_BASE_URL } from './Api';
+
 export interface TTSParams {
   speed: number;
   pitch: number;
@@ -17,7 +19,7 @@ export const TTS_CONFIG = {
   SAMPLE_RATE: 24000,
   CHANNELS: 1,
   BIT_DEPTH: 16,
-  BASE_URL: 'http://localhost:8050',
+  BASE_URL: API_BASE_URL,
 };
 
 /**

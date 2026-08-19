@@ -8,6 +8,7 @@ import {
 } from '@/constants/Session';
 import { TTS_UNMUTE_DELAY_MS } from '@/constants/TTS';
 import { getViewMode, setViewMode as persistViewMode, DEFAULT_VIEW_MODE, ViewMode } from '@/constants/ViewMode';
+import { API_BASE_URL } from '@/constants/Api';
 import { StatusBar } from '@/components/StatusBar';
 import { TranscriptArea } from '@/components/TranscriptArea';
 import { Waveform } from '@/components/Waveform';
@@ -156,7 +157,7 @@ export default function HomeScreen() {
     // 必须等截断完成再发下一轮请求，否则新的用户消息先进历史，
     // 截断就找不到那条待处理的回复了
     try {
-      await fetch(`http://localhost:8050/llm/truncate_last`, {
+      await fetch(`${API_BASE_URL}/llm/truncate_last`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
@@ -244,7 +245,7 @@ export default function HomeScreen() {
       streamingIndexRef.current = null;
       setIsLLMStreaming(false);
 
-      fetch(`http://localhost:8050/llm/truncate_last`, {
+      fetch(`${API_BASE_URL}/llm/truncate_last`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
@@ -561,7 +562,7 @@ export default function HomeScreen() {
   const callCaregiver = useCallback(async () => {
     try {
       await fetch(
-        `http://localhost:8050/llm/crisis/escalate?session_id=${encodeURIComponent(sessionIdRef.current)}`,
+        `${API_BASE_URL}/llm/crisis/escalate?session_id=${encodeURIComponent(sessionIdRef.current)}`,
         { method: 'POST' },
       );
       setErrorMessage('已经通知护理员了，他们马上过来。');

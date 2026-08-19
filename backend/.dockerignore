@@ -1,0 +1,14 @@
+.venv/
+__pycache__/
+*.pyc
+.model_cache/
+data/
+.env
+.env.local
+*.bak
+*.bak2
+*_bak.py
+selftest/
+scratch/
+.pytest_cache/
+test_llm.json

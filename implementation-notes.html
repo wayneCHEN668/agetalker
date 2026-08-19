@@ -697,6 +697,79 @@ normal 路径同样不该说「我看您脸色不好」。</p>
     没有自动检测机制。</li>
 </ul>
 
+<h2>16. Docker 部署与 APK 打包（2026-08-18）</h2>
+
+<div class="card">
+<h4>16.1 后端 requirements.txt 里的 CPU torch 索引不生效</h4>
+<p><code>torch --index-url https://download.pytorch.org/whl/cpu</code> 这种写法看着像是
+「给这一行单独指定索引」，但 pip 不支持这种逐行语法——<code>--index-url</code> 只在
+整份 requirements 文件级别生效，写在某个包后面会被静默忽略。本机 Windows venv 之所以
+装出了 CPU 版，是因为默认 PyPI 索引上 Windows 平台恰好没有匹配的 CUDA wheel，纯属巧合；
+Linux 镜像里同样的命令会连一整套 CUDA 运行时（cudnn/nccl/cusparselt/cublas 等，实测
+约 3~4G）一起装进去，且这台机器根本没 GPU。</p>
+<p><strong>没有改 <code>requirements.txt</code></strong>——本机现有 venv 靠这份文件"能用"，
+不想动它引入不必要的风险。改在 <code>backend/Dockerfile</code> 里：分两条 <code>RUN</code>，
+先显式按 CPU 索引装 <code>torch</code>/<code>torchaudio</code>，再装其余依赖；
+requirements.txt 里那两行版本已满足会被直接跳过，不会被换成 CUDA 版。</p>
+</div>
+
+<div class="card">
+<h4>16.2 模型缓存和运行时数据不进镜像</h4>
+<p><code>.model_cache/</code>（~3.9G）、<code>data/</code>（记忆台账、画像、危机事件，
+含真实老人信息）、<code>.env</code>（API 密钥）三者都不 <code>COPY</code> 进镜像
+（见 <code>backend/.dockerignore</code>），理由不同但结论一致：</p>
+<ul>
+<li>模型缓存——纯粹是体积问题，镜像升级不该每次带着 3.9G 权重走一遍网络；
+    <code>docker-compose.yml</code> 里挂载成 volume，服务器上只需传一次。</li>
+<li>运行时数据——和 <code>.gitignore</code> 里 <code>backend/data/</code> 不入库的
+    考虑一致（见第 10 节前后），不能把真实用户数据焊进一份可能被到处分发的镜像里。</li>
+<li>.env——密钥不该躺在镜像 layer 里被 <code>docker history</code> 之类的命令翻出来，
+    运行时用 <code>--env-file</code> 注入。</li>
+</ul>
+</div>
+
+<div class="card warn">
+<h4>16.3 Android 明文流量：<code>usesCleartextTraffic</code></h4>
+<p>服务器暂时没上 TLS，是 <code>http://47.253.82.38:8050</code>。Android 9（API 28）起
+系统默认拒绝 App 发起的明文网络请求，不处理的话 APK 装上之后连不上后端，且报错
+信息（一般是 <code>CLEARTEXT communication not permitted</code>）不会直接告诉你原因，
+容易当成后端没起来去排查。</p>
+<p>用 <code>expo-build-properties</code> 插件在 <code>app.json</code> 里开
+<code>android.usesCleartextTraffic: true</code>。这是全局开关，不限定域名——够用于
+现阶段测试，但意味着这个 APK 对任意域名的明文请求都不拦截。真要发正式版应该给
+服务器配反向代理挂证书，改回 <code>https://</code>，再关掉这个开关。</p>
+</div>
+
+<div class="card">
+<h4>16.4 前端服务器地址从 6 处硬编码收成 1 处</h4>
+<p><code>http://localhost:8050</code> 原来散在 <code>index.tsx</code>（3 处）、
+<code>profile.tsx</code>、<code>useLLM.ts</code>、<code>useASR.ts</code>、<code>TTS.ts</code>
+六个文件里，换服务器地址得挨个改，容易漏。新增 <code>constants/Api.ts</code> 作为唯一
+来源（<code>API_BASE_URL</code> / <code>WS_BASE_URL</code>），其余六处全部改成引用它。
+之后换地址（比如后端换机器、上了域名/TLS）只改这一个文件，重新走一遍 EAS 打包。</p>
+<p>地址是<strong>编译时</strong>打进 APK 的，不是运行时读的——改完 <code>Api.ts</code>
+必须重新 <code>eas build</code>、重新装到手机上才会生效，这点在
+<code>mobile/DEPLOY.md</code> 里专门提了一句，容易被忽略。</p>
+</div>
+
+<div class="card">
+<h4>16.5 APK 用 EAS Build 的 <code>preview</code> profile，不是默认 profile</h4>
+<p>EAS 默认产出 <code>.aab</code>（Google Play 用的格式），手机装不了。
+<code>eas.json</code> 里新增 <code>preview</code> profile，显式
+<code>"android": {"buildType": "apk"}</code>，才会出可以直接装的 <code>.apk</code>。</p>
+<p><code>app.json</code> 之前没有 <code>android.package</code>——EAS 构建必须有包名，
+补了 <code>com.agetalker.mobile</code>。<code>name</code>/<code>slug</code> 没动，
+不在这次改动范围内。</p>
+</div>
+
+<div class="card">
+<h4>16.6 部署三份文档</h4>
+<p><code>backend/DEPLOY.md</code>（本机 build → save → scp → 服务器 load/compose up，
+含模型缓存怎么弄过去两个方案）、<code>mobile/DEPLOY.md</code>（EAS 打包步骤 + 明文流量
+的说明）、以及本节。<code>backend/.env.example</code> 补了个空模板（只列变量名，
+不含真实值），方便服务器上手写 <code>.env</code> 时对着抄。</p>
+</div>
+
 </main>
 </body>
 </html>

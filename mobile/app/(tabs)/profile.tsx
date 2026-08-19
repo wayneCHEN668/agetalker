@@ -19,8 +19,9 @@ import {
 
 import { Design } from '@/constants/Design';
 import { getElderId } from '@/constants/Session';
+import { API_BASE_URL } from '@/constants/Api';
 
-const API_BASE = 'http://localhost:8050';
+const API_BASE = API_BASE_URL;
 
 interface Slot {
   name: string;
