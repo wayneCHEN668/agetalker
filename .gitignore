@@ -31,6 +31,11 @@ backend/data/memory/
 backend/data/crisis_events/
 backend/data/profiles/
 
+# Docker 镜像导出包（docker save 的产物，动辄数百 MB 到数 GB）
+*.tar
+*.tar.gz
+*.tgz
+
 # IDEs
 .qoder/
 .vscode/
