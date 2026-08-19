@@ -3,6 +3,8 @@ import { DeviceEventEmitter, Platform } from 'react-native';
 import { BARGE_IN } from '../constants/BargeIn';
 import { TTS_UNMUTE_DELAY_MS } from '../constants/TTS';
 import { WS_BASE_URL } from '../constants/Api';
+import { computeRms, floatToInt16 } from '../audio/pcm';
+import { ASR_FRAME_SAMPLES, ASR_SAMPLE_RATE } from '../constants/ASR';
 
 interface UseASROptions {
   onTranscript?: (text: string, isFinal: boolean, emotion?: any) => void;
@@ -12,13 +14,6 @@ interface UseASROptions {
   onBargeIn?: () => void;
   wsUrl?: string;
 }
-
-/** 帧能量（RMS）。与后端 ASRService.compute_rms 同一算法。 */
-const computeRms = (samples: Float32Array): number => {
-  let sum = 0;
-  for (let i = 0; i < samples.length; i++) sum += samples[i] * samples[i];
-  return Math.sqrt(sum / samples.length);
-};
 
 export const useASR = ({ onTranscript, onStatusChange, onError, onBargeIn, wsUrl = `${WS_BASE_URL}/ws/asr` }: UseASROptions) => {
   const [status, setStatus] = useState<'idle' | 'listening' | 'processing' | 'reconnecting'>('idle');
@@ -156,14 +151,14 @@ export const useASR = ({ onTranscript, onStatusChange, onError, onBargeIn, wsUrl
       // 2. Setup Audio Capture (Web)
       const stream = await navigator.mediaDevices.getUserMedia({ 
         audio: { 
-          sampleRate: 16000,
+          sampleRate: ASR_SAMPLE_RATE,
           channelCount: 1,
           echoCancellation: true
         } 
       });
       streamRef.current = stream;
 
-      const audioContext = new AudioContext({ sampleRate: 16000 });
+      const audioContext = new AudioContext({ sampleRate: ASR_SAMPLE_RATE });
       audioContextRef.current = audioContext;
 
       const source = audioContext.createMediaStreamSource(stream);
@@ -174,7 +169,7 @@ export const useASR = ({ onTranscript, onStatusChange, onError, onBargeIn, wsUrl
       analyser.smoothingTimeConstant = 0.8;
       analyserRef.current = analyser;
 
-      const processor = audioContext.createScriptProcessor(2048, 1, 1); // ~128ms frames
+      const processor = audioContext.createScriptProcessor(ASR_FRAME_SAMPLES, 1, 1); // ~128ms frames
       processorRef.current = processor;
 
       const sendFrame = (buf: ArrayBuffer) => {
@@ -185,11 +180,7 @@ export const useASR = ({ onTranscript, onStatusChange, onError, onBargeIn, wsUrl
 
       processor.onaudioprocess = (e) => {
         const inputData = e.inputBuffer.getChannelData(0);
-        // Convert Float32 to Int16
-        const pcmData = new Int16Array(inputData.length);
-        for (let i = 0; i < inputData.length; i++) {
-          pcmData[i] = Math.max(-32768, Math.min(32767, inputData[i] * 32768));
-        }
+        const pcmData = floatToInt16(inputData);
 
         // 正常收音
         if (!isTTSMutedRef.current) {
