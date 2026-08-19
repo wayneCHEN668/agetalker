@@ -1,5 +1,6 @@
 import { useState, useCallback, useRef } from 'react';
 import { DeviceEventEmitter } from 'react-native';
+import { AudioBufferSourceNode, AudioContext } from 'react-native-audio-api';
 import { TTS_CONFIG, TTSParams } from '../constants/TTS';
 
 interface QueueItem {
@@ -45,7 +46,7 @@ export const useTTS = (options: UseTTSOptions = {}) => {
    */
   const initAudio = useCallback(() => {
     if (!audioCtxRef.current || audioCtxRef.current.state === 'closed') {
-      audioCtxRef.current = new (window.AudioContext || (window as any).webkitAudioContext)({
+      audioCtxRef.current = new AudioContext({
         sampleRate: TTS_CONFIG.SAMPLE_RATE,
       });
       nextStartTimeRef.current = audioCtxRef.current.currentTime;
@@ -120,7 +121,7 @@ export const useTTS = (options: UseTTSOptions = {}) => {
 
         // 持有引用以便急停；自然播完后自己摘掉，避免长会话里越积越多
         scheduledSourcesRef.current.push(source);
-        source.onended = () => {
+        source.onEnded = () => {
           const arr = scheduledSourcesRef.current;
           const i = arr.indexOf(source);
           if (i >= 0) arr.splice(i, 1);
@@ -205,7 +206,7 @@ export const useTTS = (options: UseTTSOptions = {}) => {
     epochRef.current += 1;            // 让还在 await 的旧 playOnce 作废
     playQueueRef.current = [];
     scheduledSourcesRef.current.forEach((s) => {
-      try { s.onended = null; s.stop(); } catch { /* 已经停了 */ }
+      try { s.onEnded = null; s.stop(); } catch { /* 已经停了 */ }
     });
     scheduledSourcesRef.current = [];
     if (audioCtxRef.current) {
