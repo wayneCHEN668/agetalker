@@ -4,6 +4,7 @@ import { BARGE_IN } from '../constants/BargeIn';
 import { TTS_UNMUTE_DELAY_MS } from '../constants/TTS';
 import { WS_BASE_URL } from '../constants/Api';
 import { computeRms, floatToInt16 } from '../audio/pcm';
+import { BargeInDetector } from '../audio/bargeInDetector';
 import { ASR_FRAME_SAMPLES, ASR_SAMPLE_RATE } from '../constants/ASR';
 
 interface UseASROptions {
@@ -25,10 +26,7 @@ export const useASR = ({ onTranscript, onStatusChange, onError, onBargeIn, wsUrl
 
   // ─── 打断检测状态 ────────────────────────────────────────────────────────
   // TTS 期间麦克风帧不发往云端（防回声自问自答），但仍在本地过能量检测。
-  const ttsStartedAtRef = useRef(0);
-  const baselineRmsRef = useRef<number[]>([]);   // 开头一小段的底噪采样
-  const thresholdRef = useRef(0);                // 由底噪算出的判定阈值
-  const sustainedRef = useRef(0);                // 连续超阈值的帧数
+  const detectorRef = useRef<BargeInDetector>(new BargeInDetector());
   // 预缓冲：静音期最近若干帧。检测本身要花几帧时间，没有它老人开口的头几个字
   // 会被吃掉——打断成立时先把这些补发给云端。
   const preBufferRef = useRef<ArrayBuffer[]>([]);
@@ -37,10 +35,7 @@ export const useASR = ({ onTranscript, onStatusChange, onError, onBargeIn, wsUrl
 
   /** 重置一轮 TTS 的打断检测状态。 */
   const resetBargeInState = useCallback(() => {
-    ttsStartedAtRef.current = Date.now();
-    baselineRmsRef.current = [];
-    thresholdRef.current = 0;
-    sustainedRef.current = 0;
+    detectorRef.current.reset(Date.now());
     preBufferRef.current = [];
   }, []);
 
@@ -193,47 +188,10 @@ export const useASR = ({ onTranscript, onStatusChange, onError, onBargeIn, wsUrl
         pre.push(pcmData.buffer);
         if (pre.length > BARGE_IN.PREBUFFER_FRAMES) pre.shift();
 
-        if (!BARGE_IN.ENABLED) return;
-
-        const elapsed = Date.now() - ttsStartedAtRef.current;
-        const rms = computeRms(inputData);
-
-        // 阶段一：测环境底噪。浏览器 AEC 已经把喇叭声消掉大半，
-        // 这时候的读数基本就是房间本底。
-        if (elapsed < BARGE_IN.BASELINE_MS) {
-          baselineRmsRef.current.push(rms);
-          return;
-        }
-
-        // 阶段二：底噪采完，算一次阈值
-        if (thresholdRef.current === 0) {
-          const samples = baselineRmsRef.current;
-          const mean = samples.length
-            ? samples.reduce((a, b) => a + b, 0) / samples.length
-            : 0;
-          thresholdRef.current = Math.max(
-            mean * BARGE_IN.THRESHOLD_RATIO,
-            BARGE_IN.MIN_THRESHOLD_RMS,
-          );
-          console.log(
-            `[BargeIn] 底噪=${mean.toFixed(4)} 阈值=${thresholdRef.current.toFixed(4)}`,
-          );
-        }
-
-        // 保护期内不判打断，避免老人自己上一句的尾音把回复刚开头就掐掉
-        if (elapsed < BARGE_IN.GRACE_MS) return;
-
-        // 阶段三：连续超阈值才算，滤掉咳嗽/关门/电视里的单个爆音
-        if (rms > thresholdRef.current) {
-          sustainedRef.current += 1;
-        } else {
-          sustainedRef.current = 0;
-          return;
-        }
-        if (sustainedRef.current < BARGE_IN.SUSTAINED_FRAMES) return;
+        if (!detectorRef.current.process(computeRms(inputData), Date.now())) return;
 
         // ── 判定为插话 ──
-        console.log(`[BargeIn] 检测到插话 (rms=${rms.toFixed(4)})`);
+        console.log('[BargeIn] 检测到插话');
         isTTSMutedRef.current = false;      // 立刻恢复收音，不等 tts-end 的 200ms 去抖
         if (unmuteTimeoutRef.current) {
           clearTimeout(unmuteTimeoutRef.current);
@@ -242,7 +200,6 @@ export const useASR = ({ onTranscript, onStatusChange, onError, onBargeIn, wsUrl
         // 先补发预缓冲，老人开口的头几个字才不会丢
         preBufferRef.current.forEach(sendFrame);
         preBufferRef.current = [];
-        sustainedRef.current = 0;
 
         onBargeInRef.current?.();
       };
