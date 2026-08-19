@@ -39,6 +39,14 @@
             "usesCleartextTraffic": true
           }
         }
+      ],
+      [
+        "react-native-audio-api",
+        {
+          "androidPermissions": [
+            "android.permission.RECORD_AUDIO"
+          ]
+        }
       ]
     ],
     "experiments": {
