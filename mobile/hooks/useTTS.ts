@@ -1,4 +1,5 @@
 import { useState, useCallback, useRef } from 'react';
+import { DeviceEventEmitter } from 'react-native';
 import { TTS_CONFIG, TTSParams } from '../constants/TTS';
 
 interface QueueItem {
@@ -159,7 +160,7 @@ export const useTTS = (options: UseTTSOptions = {}) => {
     isPlayingRef.current = true;
     setIsPlaying(true);
 
-    window.dispatchEvent(new CustomEvent('tts-start'));
+    DeviceEventEmitter.emit('tts-start');
     const epoch = epochRef.current;
 
     // 内层：把队列里的文本尽快全部取回来并排期（互相之间不等播放）
@@ -181,7 +182,7 @@ export const useTTS = (options: UseTTSOptions = {}) => {
     isPlayingRef.current = false;
     setIsPlaying(false);
 
-    window.dispatchEvent(new CustomEvent('tts-end'));
+    DeviceEventEmitter.emit('tts-end');
     onPlaybackDone?.();
   };
 
@@ -223,7 +224,7 @@ export const useTTS = (options: UseTTSOptions = {}) => {
    */
   const stopForBargeIn = useCallback(() => {
     haltAudio();
-    window.dispatchEvent(new CustomEvent('tts-end'));
+    DeviceEventEmitter.emit('tts-end');
   }, [haltAudio]);
 
   /**
@@ -266,7 +267,7 @@ export const useTTS = (options: UseTTSOptions = {}) => {
       audioCtxRef.current.close();
       audioCtxRef.current = null;
     }
-    window.dispatchEvent(new CustomEvent('tts-end'));
+    DeviceEventEmitter.emit('tts-end');
   }, [haltAudio]);
 
   return {

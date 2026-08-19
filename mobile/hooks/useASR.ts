@@ -1,7 +1,8 @@
 import { useState, useCallback, useRef, useEffect } from 'react';
-import { Platform } from 'react-native';
+import { DeviceEventEmitter, Platform } from 'react-native';
 import { BARGE_IN } from '../constants/BargeIn';
 import { TTS_UNMUTE_DELAY_MS } from '../constants/TTS';
+import { WS_BASE_URL } from '../constants/Api';
 
 interface UseASROptions {
   onTranscript?: (text: string, isFinal: boolean, emotion?: any) => void;
@@ -19,7 +20,7 @@ const computeRms = (samples: Float32Array): number => {
   return Math.sqrt(sum / samples.length);
 };
 
-export const useASR = ({ onTranscript, onStatusChange, onError, onBargeIn, wsUrl = 'ws://localhost:8050/ws/asr' }: UseASROptions) => {
+export const useASR = ({ onTranscript, onStatusChange, onError, onBargeIn, wsUrl = `${WS_BASE_URL}/ws/asr` }: UseASROptions) => {
   const [status, setStatus] = useState<'idle' | 'listening' | 'processing' | 'reconnecting'>('idle');
   const [isRecording, setIsRecording] = useState(false);
 
@@ -289,12 +290,12 @@ export const useASR = ({ onTranscript, onStatusChange, onError, onBargeIn, wsUrl
       }, TTS_UNMUTE_DELAY_MS);
     };
 
-    window.addEventListener('tts-start', handleTTSStart);
-    window.addEventListener('tts-end', handleTTSEnd);
+    const startSub = DeviceEventEmitter.addListener('tts-start', handleTTSStart);
+    const endSub = DeviceEventEmitter.addListener('tts-end', handleTTSEnd);
 
     return () => {
-      window.removeEventListener('tts-start', handleTTSStart);
-      window.removeEventListener('tts-end', handleTTSEnd);
+      startSub.remove();
+      endSub.remove();
       if (unmuteTimeoutRef.current) clearTimeout(unmuteTimeoutRef.current);
     };
   }, [resetBargeInState]);
