@@ -1,5 +1,6 @@
 import { useState, useCallback, useRef, useEffect } from 'react';
-import { DeviceEventEmitter, Platform } from 'react-native';
+import { DeviceEventEmitter } from 'react-native';
+import { AnalyserNode, AudioContext, AudioManager, AudioRecorder } from 'react-native-audio-api';
 import { BARGE_IN } from '../constants/BargeIn';
 import { TTS_UNMUTE_DELAY_MS } from '../constants/TTS';
 import { WS_BASE_URL } from '../constants/Api';
@@ -45,17 +46,17 @@ export const useASR = ({ onTranscript, onStatusChange, onError, onBargeIn, wsUrl
   const wsRef = useRef<WebSocket | null>(null);
   const audioContextRef = useRef<AudioContext | null>(null);
   const analyserRef = useRef<AnalyserNode | null>(null);
-  const processorRef = useRef<ScriptProcessorNode | null>(null);
-  const streamRef = useRef<MediaStream | null>(null);
+  const recorderRef = useRef<AudioRecorder | null>(null);
 
   const stop = useCallback(() => {
     setIsRecording(false);
     setStatus('idle');
     onStatusChange?.('idle');
 
-    if (processorRef.current) {
-      processorRef.current.disconnect();
-      processorRef.current = null;
+    if (recorderRef.current) {
+      recorderRef.current.clearOnAudioReady();
+      recorderRef.current.stop();
+      recorderRef.current = null;
     }
     if (analyserRef.current) {
       analyserRef.current.disconnect();
@@ -65,10 +66,9 @@ export const useASR = ({ onTranscript, onStatusChange, onError, onBargeIn, wsUrl
       audioContextRef.current.close();
       audioContextRef.current = null;
     }
-    if (streamRef.current) {
-      streamRef.current.getTracks().forEach(track => track.stop());
-      streamRef.current = null;
-    }
+    AudioManager.setAudioSessionActivity(false).catch(() => {
+      // 释放失败不影响用户，下次 start 会重新激活
+    });
     if (wsRef.current) {
       console.log('[useASR.stop] User-initiated close, setting intentional flag');
       isIntentionalCloseRef.current = true;
@@ -86,8 +86,17 @@ export const useASR = ({ onTranscript, onStatusChange, onError, onBargeIn, wsUrl
   }, [onStatusChange]);
 
   const start = useCallback(async (sessionId: string) => {
-    if (Platform.OS !== 'web') {
-      console.warn('Real-time audio capture is currently optimized for Web/Laptop testing.');
+    // 麦克风权限。web 端浏览器会自己弹窗，原生端必须显式申请。
+    const permission = await AudioManager.requestRecordingPermissions();
+    if (permission !== 'Granted') {
+      onError?.('我听不见您说话，请在手机设置里允许使用麦克风。');
+      return;
+    }
+
+    try {
+      await AudioManager.setAudioSessionActivity(true);
+    } catch {
+      onError?.('麦克风打不开，请再试一次。');
       return;
     }
 
@@ -143,29 +152,26 @@ export const useASR = ({ onTranscript, onStatusChange, onError, onBargeIn, wsUrl
         stop();
       };
 
-      // 2. Setup Audio Capture (Web)
-      const stream = await navigator.mediaDevices.getUserMedia({ 
-        audio: { 
-          sampleRate: ASR_SAMPLE_RATE,
-          channelCount: 1,
-          echoCancellation: true
-        } 
-      });
-      streamRef.current = stream;
-
+      // 2. 音频采集
       const audioContext = new AudioContext({ sampleRate: ASR_SAMPLE_RATE });
       audioContextRef.current = audioContext;
 
-      const source = audioContext.createMediaStreamSource(stream);
-      
-      // Setup Analyser
       const analyser = audioContext.createAnalyser();
       analyser.fftSize = 2048;
       analyser.smoothingTimeConstant = 0.8;
       analyserRef.current = analyser;
 
-      const processor = audioContext.createScriptProcessor(ASR_FRAME_SAMPLES, 1, 1); // ~128ms frames
-      processorRef.current = processor;
+      const recorder = new AudioRecorder();
+      recorderRef.current = recorder;
+      // 接进音频图，Waveform / Orb 靠 analyser 取数据画图。
+      // 注意：AudioRecorder.connect() 实际只接受一个 RecorderAdapterNode（不是
+      // (audioContext, analyser) 这种两参数签名——已核对安装的库的类型定义，
+      // mobile/node_modules/react-native-audio-api/lib/typescript/core/AudioRecorder.d.ts
+      // 里 `connect(node: RecorderAdapterNode): void`），所以先建适配节点，
+      // 适配节点接到 analyser，再把 recorder 接到适配节点。
+      const recorderAdapter = audioContext.createRecorderAdapter();
+      recorderAdapter.connect(analyser);
+      recorder.connect(recorderAdapter);
 
       const sendFrame = (buf: ArrayBuffer) => {
         if (wsRef.current?.readyState === WebSocket.OPEN) {
@@ -173,40 +179,51 @@ export const useASR = ({ onTranscript, onStatusChange, onError, onBargeIn, wsUrl
         }
       };
 
-      processor.onaudioprocess = (e) => {
-        const inputData = e.inputBuffer.getChannelData(0);
-        const pcmData = floatToInt16(inputData);
+      recorder.onAudioReady(
+        {
+          sampleRate: ASR_SAMPLE_RATE,
+          bufferLength: ASR_FRAME_SAMPLES,
+          channelCount: 1,
+        },
+        ({ buffer }) => {
+          const inputData = buffer.getChannelData(0);
+          const pcmData = floatToInt16(inputData);
 
-        // 正常收音
-        if (!isTTSMutedRef.current) {
-          sendFrame(pcmData.buffer);
-          return;
-        }
+          // 正常收音
+          if (!isTTSMutedRef.current) {
+            sendFrame(pcmData.buffer);
+            return;
+          }
 
-        // ── TTS 播放期间：不往云端发（防回声），但本地判断有没有人在插话 ──
-        const pre = preBufferRef.current;
-        pre.push(pcmData.buffer);
-        if (pre.length > BARGE_IN.PREBUFFER_FRAMES) pre.shift();
+          // ── TTS 播放期间：不往云端发（防回声），但本地判断有没有人在插话 ──
+          const pre = preBufferRef.current;
+          pre.push(pcmData.buffer);
+          if (pre.length > BARGE_IN.PREBUFFER_FRAMES) pre.shift();
 
-        if (!detectorRef.current.process(computeRms(inputData), Date.now())) return;
+          if (!detectorRef.current.process(computeRms(inputData), Date.now())) return;
 
-        // ── 判定为插话 ──
-        console.log('[BargeIn] 检测到插话');
-        isTTSMutedRef.current = false;      // 立刻恢复收音，不等 tts-end 的 200ms 去抖
-        if (unmuteTimeoutRef.current) {
-          clearTimeout(unmuteTimeoutRef.current);
-          unmuteTimeoutRef.current = null;
-        }
-        // 先补发预缓冲，老人开口的头几个字才不会丢
-        preBufferRef.current.forEach(sendFrame);
-        preBufferRef.current = [];
+          // ── 判定为插话 ──
+          console.log('[BargeIn] 检测到插话');
+          isTTSMutedRef.current = false;      // 立刻恢复收音，不等 tts-end 的 200ms 去抖
+          if (unmuteTimeoutRef.current) {
+            clearTimeout(unmuteTimeoutRef.current);
+            unmuteTimeoutRef.current = null;
+          }
+          // 先补发预缓冲，老人开口的头几个字才不会丢
+          preBufferRef.current.forEach(sendFrame);
+          preBufferRef.current = [];
 
-        onBargeInRef.current?.();
-      };
+          onBargeInRef.current?.();
+        },
+      );
 
-      source.connect(analyser);
-      analyser.connect(processor);
-      processor.connect(audioContext.destination);
+      const result = await recorder.start();
+      if (result.status === 'error') {
+        console.error('[useASR] 录音启动失败:', result.message);
+        onError?.('麦克风打不开，请再试一次。');
+        stop();
+        return;
+      }
 
     } catch (err) {
       console.error('Failed to start ASR:', err);
