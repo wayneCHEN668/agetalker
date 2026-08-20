@@ -1,4 +1,5 @@
 import { useState, useCallback, useRef } from 'react';
+import { fetch as expoFetch } from 'expo/fetch';
 import { DeviceEventEmitter } from 'react-native';
 import { AudioBufferSourceNode, AudioContext } from 'react-native-audio-api';
 import { TTS_CONFIG, TTSParams } from '../constants/TTS';
@@ -74,7 +75,9 @@ export const useTTS = (options: UseTTSOptions = {}) => {
     let chunkStart: number | null = null;
 
     try {
-      const response = await fetch(`${apiBase}/tts/stream`, {
+      // expo/fetch 而非全局 fetch：见 useLLM.ts 同处注释。这里更要紧——PCM 是边收边
+      // 排期播放的，拿不到流就只能整段等完，逐句流水线的意义全没了。
+      const response = await expoFetch(`${apiBase}/tts/stream`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
