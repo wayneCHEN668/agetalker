@@ -1,5 +1,8 @@
 import { useState, useCallback, useRef } from 'react';
+import { fetch as expoFetch } from 'expo/fetch';
 import { DeviceEventEmitter } from 'react-native';
+import { AudioBufferSourceNode, AudioContext } from 'react-native-audio-api';
+import { createPcmStreamDecoder } from '../audio/pcm';
 import { TTS_CONFIG, TTSParams } from '../constants/TTS';
 
 interface QueueItem {
@@ -45,7 +48,7 @@ export const useTTS = (options: UseTTSOptions = {}) => {
    */
   const initAudio = useCallback(() => {
     if (!audioCtxRef.current || audioCtxRef.current.state === 'closed') {
-      audioCtxRef.current = new (window.AudioContext || (window as any).webkitAudioContext)({
+      audioCtxRef.current = new AudioContext({
         sampleRate: TTS_CONFIG.SAMPLE_RATE,
       });
       nextStartTimeRef.current = audioCtxRef.current.currentTime;
@@ -73,7 +76,9 @@ export const useTTS = (options: UseTTSOptions = {}) => {
     let chunkStart: number | null = null;
 
     try {
-      const response = await fetch(`${apiBase}/tts/stream`, {
+      // expo/fetch 而非全局 fetch：见 useLLM.ts 同处注释。这里更要紧——PCM 是边收边
+      // 排期播放的，拿不到流就只能整段等完，逐句流水线的意义全没了。
+      const response = await expoFetch(`${apiBase}/tts/stream`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
@@ -90,18 +95,17 @@ export const useTTS = (options: UseTTSOptions = {}) => {
       }
 
       const reader = response.body.getReader();
+      const pcmDecoder = createPcmStreamDecoder();
 
       while (true) {
         const { done, value } = await reader.read();
         if (done) break;
         if (epoch !== epochRef.current) return;   // 已被打断，别再排新的了
 
-        // Convert Uint8Array (PCM 16bit) to Float32 for WebAudio
-        const int16Buffer = new Int16Array(value.buffer, value.byteOffset, value.byteLength / 2);
-        const float32Buffer = new Float32Array(int16Buffer.length);
-        for (let i = 0; i < int16Buffer.length; i++) {
-          float32Buffer[i] = int16Buffer[i] / 32768.0;
-        }
+        // 解码器负责跨片拼接半个样本，见 audio/pcm.ts。这里只可能拿到 0 个或若干个
+        // 完整样本；0 个时直接跳过——createBuffer 帧数为 0 会抛 NotSupportedError。
+        const float32Buffer = pcmDecoder.push(value);
+        if (float32Buffer.length === 0) continue;
 
         // Create AudioBuffer
         const audioBuffer = ctx.createBuffer(1, float32Buffer.length, TTS_CONFIG.SAMPLE_RATE);
@@ -120,7 +124,7 @@ export const useTTS = (options: UseTTSOptions = {}) => {
 
         // 持有引用以便急停；自然播完后自己摘掉，避免长会话里越积越多
         scheduledSourcesRef.current.push(source);
-        source.onended = () => {
+        source.onEnded = () => {
           const arr = scheduledSourcesRef.current;
           const i = arr.indexOf(source);
           if (i >= 0) arr.splice(i, 1);
@@ -205,7 +209,7 @@ export const useTTS = (options: UseTTSOptions = {}) => {
     epochRef.current += 1;            // 让还在 await 的旧 playOnce 作废
     playQueueRef.current = [];
     scheduledSourcesRef.current.forEach((s) => {
-      try { s.onended = null; s.stop(); } catch { /* 已经停了 */ }
+      try { s.onEnded = null; s.stop(); } catch { /* 已经停了 */ }
     });
     scheduledSourcesRef.current = [];
     if (audioCtxRef.current) {

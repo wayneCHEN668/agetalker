@@ -770,6 +770,140 @@ requirements.txt 里那两行版本已满足会被直接跳过，不会被换成
 不含真实值），方便服务器上手写 <code>.env</code> 时对着抄。</p>
 </div>
 
+<h2>17. 原生端音频管线：真机验证与收尾（2026-08-20）</h2>
+
+<div class="card">
+<h4>17.1 起点：<code>window.addEventListener</code> 崩溃只是冰山一角</h4>
+<p>APK 装上原生设备后启动即崩，报 <code>window.addEventListener is not a
+function</code>。表面原因很小——<code>useASR</code>/<code>useTTS</code> 用浏览器的
+<code>window</code> 事件收发 TTS 静音信号，原生运行时没有这套 API，改用 RN 内建的
+<code>DeviceEventEmitter</code> 即可修好。</p>
+<p>但深挖下去发现这只是冰山一角：<strong>录音与放音整条链路建立在浏览器 Web Audio
+API 之上</strong>，原生端从未真正实现过——<code>useASR.ts</code> 里甚至有一道显式拦截
+<code>if (Platform.OS !== 'web') return;</code>，原生端按按钮只是静默返回。这才是
+本节其余内容要解决的真问题：把这条链路真正搬到原生端，并在真机上验证。</p>
+</div>
+
+<div class="card warn">
+<h4>17.2 关键发现：<code>react-native-audio-api</code> 在 web 端没有
+<code>AudioRecorder</code></h4>
+<p>选型时的核心依据是「库在 web 上也能用，两端可以统一」。Task 4 实现时证伪了这个
+前提——三种方式验证（源码、编译产物、清缓存后的真实构建）：这个库的 web 构建
+<strong>完全没有 <code>AudioRecorder</code></strong>（录音相关 API 整体缺失），
+而且 <code>useASR.ts</code> 一 import 这个库，web 端 bundle 直接编译失败（库的
+web 入口无条件引入依赖 <code>react-native-gesture-handler</code> 的音频控件组件，
+项目未装此包）。</p>
+<p><strong>决定</strong>（已与需求方确认）：接受 web 端录音不可用，不再维护该路径。
+补装 <code>react-native-gesture-handler</code> 修掉编译失败；<code>AudioContext</code>
+/<code>AnalyserNode</code>（放音、可视化）不受影响，继续两端统一。完整记录见
+<code>docs/superpowers/specs/2026-08-19-native-audio-pipeline-design.md</code> §4.1a。</p>
+</div>
+
+<div class="card">
+<h4>17.3 <code>expo/fetch</code>：修复原生端的 <code>ReadableStream</code> 缺失</h4>
+<p>真机第一次真正跑起来后，点「我想和你聊聊」报
+<code>ReadableStream not supported in this environment</code>。根因：React Native
+的全局 <code>fetch</code> 基于 XMLHttpRequest，不实现流式响应体，<code>useLLM</code>
+的 SSE 流式回复与 <code>useTTS</code> 的 PCM 流式播放都依赖
+<code>response.body.getReader()</code>，在原生端全部拿不到。</p>
+<p>改用 <code>expo/fetch</code>（Expo SDK 54 自带）——它的 <code>FetchResponse.body</code>
+是真正的 <code>ReadableStream</code>，且支持 <code>AbortController</code>（打断/截断
+逻辑依赖 <code>signal</code>）。只换了两处流式调用，五处非流式 POST 继续用全局
+<code>fetch</code>，改动面刻意收窄。</p>
+<p>这次审查过程中出现过两次 subagent 派发失败（平台侧模型路由错误），第三次改由
+控制器（我）直接实现，但审查环节照常派发、没有跳过——这是关键的补偿性控制，审查者
+独立把 <code>AbortController</code> 的行为一路追进了 <code>expo/fetch</code> 的
+Kotlin 源码，确认打断时 <code>reader.read()</code> 是<strong>拒绝</strong>而非
+正常结束，这一点如果错了会导致打断被误判成回复正常说完。</p>
+</div>
+
+<div class="card ok">
+<h4>17.4 PCM 流式解码的分片边界 bug——由代码审查和真机测试各自独立发现</h4>
+<p>修完 <code>expo/fetch</code> 后真机测试，TTS 报
+<code>NotSupportedError: The number of frames provided (0)</code>——<code>expo/fetch</code>
+会给出零长度分片，原代码直接传给 <code>createBuffer</code> 就炸。</p>
+<p>有意思的是，<strong>Task 7 的审查者在完全不知道设备测试结果的情况下</strong>，
+独立追进 <code>react-native-audio-api</code> 的 Kotlin 源码（<code>NativeResponse.kt</code>
+按 okio 缓冲区的实际内容出块），发现了同一根因的另一半：分片长度不保证是偶数字节，
+而 PCM16 一个样本占 2 字节。原代码
+<code>new Int16Array(value.buffer, value.byteOffset, value.byteLength / 2)</code>
+在奇数长度时被 <code>ToIndex</code> 静默截断，丢掉尾字节，<strong>后续样本整体错位
+一个字节——整段音频变噪声</strong>。浏览器 fetch 的分片大小恰好从没触发过这个问题。</p>
+<p>抽成 <code>createPcmStreamDecoder()</code>（<code>mobile/audio/pcm.ts</code>），
+跨片接住半个样本、跳过空分片、手工组小端并做符号扩展，补了 9 个单测（含"逐字节喂入"
+这种最极端的分片场景）。真机复测：<code>Error playing sentence</code> 从 3 次降到
+0 次。</p>
+</div>
+
+<div class="card">
+<h4>17.5 Windows 构建：路径长度限制导致原生库编译失败</h4>
+<p>worktree 路径（<code>.worktrees\native-audio-pipeline\</code>）比主仓库深 33
+个字符，<code>react-native-audio-api</code> 带 C++ 源码，CMake 会把完整源码绝对
+路径再拼一遍进目标文件目录，直接撞上 Windows 260 字符路径上限：
+<code>ninja: error: mkdir(...): No such file or directory</code>。</p>
+<p>没有去开系统的长路径支持（管理员级系统设置，且 ninja/CMake 经常不认它），
+改为在短路径（<code>D:\atk</code>，57 字符，比主仓库还短）挂一个只用于构建的
+游离 worktree，正式 worktree 不动。所有代码改动仍然只在正式 worktree 里提交，
+<code>D:\atk</code> 纯粹是构建/测试用的一次性副本。</p>
+</div>
+
+<div class="card warn">
+<h4>17.6 spec §8.1 风险兑现：Android 无可用 AEC，已关闭打断功能</h4>
+<p>真机实测：AI 刚开口念第一个字就被自己打断，反复循环。日志证据决定性——「静音」期间
+麦克风读数 <code>0.03~0.17</code>，是真实底噪（<code>0.00013</code>）的 200~1000
+倍，是喇叭声被麦克风直接收了回去。这正是 spec §8.1 当初按乐观假设推进时预判的
+失败模式。</p>
+<p>按 spec §8.1 列出的补偿路径，选择最小改动的降级方案：
+<code>BARGE_IN.ENABLED</code> 改为 <code>false</code>，退回「不能打断」的老行为。
+这个常量 web/原生共用，两端同时生效。自研回声抑制、提高阈值+ASR 文本二次确认这两条
+留作后续，重新打开开关前必须先做其中一个。</p>
+</div>
+
+<div class="card ok">
+<h4>17.7 spec §8.2 排除：双采样率可以共存</h4>
+<p>ASR 侧 16kHz、TTS 侧 24kHz 两个 <code>AudioContext</code> 原生端能否共存，
+库文档未说明，是设计阶段标记的第二个风险点。真机多轮对话实测，用户确认「AI 说话的
+声音听起来正常」——无变调、无语速异常。不需要统一采样率或做重采样这条退路。</p>
+</div>
+
+<div class="card warn">
+<h4>17.8 已发现但超出本次范围：远程后端多轮识别异常</h4>
+<p>真机上一度出现「只能转录第一句话，AI 回复完之后再说话就没反应」。日志显示前端
+一切正常（麦克风采到真实语音、帧确实在发、WebSocket 全程未断开），怀疑在后端。
+临时切换到本机后端（<code>uvicorn --host 0.0.0.0</code>，手机通过局域网 IP 访问）
+复现同一场对话——<strong>完全正常</strong>：日志里同一个 WebSocket 会话内连续
+跑了 4 次 <code>/llm/stream</code>，说明本机后端能正确处理多轮。</p>
+<p>结论：这是<strong>远程服务器</strong>（<code>47.253.82.38</code>）部署的问题
+（版本、配置或网络路径），不是这次原生音频管线改造的任何代码，也不是后端设计
+本身的缺陷（同一份代码本地跑是对的）。已明确告知需求方，留作独立问题排查，
+不在这个计划里处理。</p>
+</div>
+
+<div class="card">
+<h4>17.9 过程中的两个环境教训（已写进 CLAUDE.md）</h4>
+<ul>
+<li><strong>worktree 与主仓库是两份独立代码</strong>：从主仓库构建装机会装上
+    没有这次改动的旧代码，症状极具迷惑性（大部分功能正常，只有改过的功能"没反应"）。
+    <code>preview_start</code> 的 <code>name</code> 形式解析的 <code>cwd</code> 也是
+    相对主仓库，不是当前 worktree。快速判别法：
+    <code>adb shell dumpsys package &lt;包名&gt; | grep -A5 "requested permissions"</code>
+    对比 worktree 里 <code>AndroidManifest.xml</code> 的权限声明。</li>
+<li><strong>Android 模拟器的麦克风默认是关的</strong>：启动参数缺
+    <code>-allow-host-audio</code>，或者开着但 Extended Controls 里
+    "Virtual microphone uses host audio input" 这个运行时开关是关的，两种情况
+    表现完全一样——麦克风读数精确为 <code>0.00000</code>（不是噪声小，是绝对零）。
+    这也是为什么 spec 和计划都强调「真机优先，模拟器的麦克风行为不可靠」。</li>
+</ul>
+</div>
+
+<div class="card">
+<h4>17.10 最终验证结论</h4>
+<p>Android 真机（PHZ110）完整验证通过：麦克风权限流程、录音、ASR 转录、情绪识别、
+LLM 流式回复、TTS 播放、多轮对话、正常挂断收尾——全部确认工作正常，有真实证据
+（日志、截图、后端调用记录）支撑。spec §8.1、§8.2 两条设计阶段标记的风险都已有
+明确结论并记录。web 端因 §4.1a 的决定不再维护录音路径，放音/可视化仍与原生统一。</p>
+</div>
+
 </main>
 </body>
 </html>

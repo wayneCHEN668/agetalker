@@ -1,4 +1,5 @@
 import { useState, useCallback, useRef } from 'react';
+import { fetch as expoFetch, type FetchRequestInit } from 'expo/fetch';
 import { TTSParams } from '../constants/TTS';
 import { getElderId } from '../constants/Session';
 import { API_BASE_URL } from '../constants/Api';
@@ -64,7 +65,9 @@ export const useLLM = (options: UseLLMOptions = {}) => {
    */
   const runStream = useCallback(async (
     url: string,
-    init?: RequestInit,
+    // expo/fetch 自己的 init 类型，不是 DOM 的 RequestInit——后者的 body 允许 null，
+    // expo/fetch 不接受。三个调用点只传 method/headers/body，都在这个类型范围内。
+    init?: FetchRequestInit,
     fallbackText = '哎呀，我刚才走神了，没听清您说什么。能麻烦您再说一遍吗？',
   ) => {
     setResponse('');
@@ -89,7 +92,10 @@ export const useLLM = (options: UseLLMOptions = {}) => {
     abortRef.current = controller;
 
     try {
-      const res = await fetch(url, { ...init, signal: controller.signal });
+      // expo/fetch 而非全局 fetch：RN 的全局 fetch 基于 XMLHttpRequest，不实现流式
+      // 响应体，res.body 拿不到，下面的 getReader() 必然失败。expo/fetch 提供真正的
+      // ReadableStream，且同样支持 AbortController（打断逻辑依赖 signal）。
+      const res = await expoFetch(url, { ...init, signal: controller.signal });
 
       if (!res.ok) {
         throw new Error(`HTTP error! status: ${res.status}`);

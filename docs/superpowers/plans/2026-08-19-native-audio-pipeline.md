@@ -18,6 +18,13 @@
 - `useASR` 对外返回签名不变：`{ start, stop, status, isRecording, analyser }`。
 - `useTTS` 对外返回签名不变：`{ speak, stop, stopForBargeIn, getSpokenText, resetSpokenText, isPlaying, isPlayingRef }`。
 - `mobile/app/(tabs)/index.tsx`、`components/Waveform.tsx`、`components/OrbVisualizer.tsx` **不得修改**。
+  **例外（Task 4 实现期间发现，见 spec §4.1a）**：`useASR` 返回的 `analyser` 类型从 DOM 全局
+  `AnalyserNode` 变成库自带的 `AnalyserNode` 类后，tsc 会在这两个文件报结构不匹配。允许对
+  `Waveform.tsx`/`OrbVisualizer.tsx` 做**仅类型导入**的修改（`import type { AnalyserNode } from
+  'react-native-audio-api'`，替换掉隐式的 DOM 全局类型），前提是不改变任何运行时行为——
+  这两个文件只调用 `frequencyBinCount`/`getByteTimeDomainData`/`getByteFrequencyData`/`fftSize`/
+  `smoothingTimeConstant`，库的 `AnalyserNode` 对这些成员的实现与 DOM 版一致。除类型导入行以外
+  不得有任何其他改动。
 - 面向老人的错误文案：不暴露技术细节，不出现英文与错误码。
 - 每个任务结束时 `npx tsc --noEmit` 必须无错。
 - 项目 `newArchEnabled: true`，不得关闭。
@@ -882,27 +889,44 @@ Expected: tsc 无输出；jest 全部通过
 
 若 tsc 报 `Platform` 已声明但未使用，删掉该 import。
 
-- [ ] **Step 7: web 端回归验证**
+- [ ] **Step 6a（本步在实现期间新增，见 spec §4.1a 修订）：装 react-native-gesture-handler**
+
+`react-native-audio-api` 的 web 入口无条件引入自带的音频控件组件，依赖
+`react-native-gesture-handler`。不装的话 `useASR.ts` 一 import 这个库，
+web 端 bundle 直接编译失败——**不只是录音功能受影响，聊聊天/练练脑/我自己三个
+tab 的 web 版全部起不来**。
+
+```bash
+cd mobile
+npx expo install react-native-gesture-handler
+```
+
+- [ ] **Step 7: web 端回归验证（范围已按 spec §4.1a 修订）**
 
 ```bash
 cd mobile
 npx expo start --web
 ```
 
-逐项确认（这是换库后 web 端有没有退步的第一道关）：
-- [ ] 按「我想和你聊聊」能开始录音
-- [ ] 说话能出字（说明 16kHz/2048 帧格式后端认得）
-- [ ] AI 回复能出声
-- [ ] AI 说话时插话能打断，屏幕文字截断在实际听到的位置
-- [ ] Waveform（切到「看文字」模式）随声音起伏
+逐项确认：
+- [ ] 三个 tab 都能正常打开，bundle 编译无报错（验证 Step 6a 的补装解决了编译失败）
+- ~~按「我想和你聊聊」能开始录音~~ **不适用**：`AudioRecorder` 在 web 构建里不存在
+  （spec §4.1a），点击后台无反应是预期行为，不是缺陷，不用管
+- [ ] AI 回复能出声（放音不受影响，仍需验证）
+- ~~AI 说话时插话能打断~~ **不适用**：依赖录音侧检测，移至 Task 6 的 Android 验证
+- [ ] Waveform（切到「看文字」模式）在 TTS 播放时随声音起伏
 
-任何一项不过，先修好再进 Step 8——不要带着 web 回归上真机，两个变量叠在一起没法定位。
+任何一项标了「仍需验证」的不过，先修好再进 Step 8——不要带着回归上真机。
 
 - [ ] **Step 8: 提交**
 
 ```bash
-git add mobile/hooks/useASR.ts
-git commit -m "feat(mobile): ASR 录音改用 react-native-audio-api，去掉平台拦截"
+git add mobile/hooks/useASR.ts mobile/package.json mobile/package-lock.json
+git commit -m "feat(mobile): ASR 录音改用 react-native-audio-api，去掉平台拦截
+
+react-native-audio-api 的 web 构建没有 AudioRecorder（见 spec §4.1a），
+接受 web 端录音不可用，不再维护该路径；补装 react-native-gesture-handler
+解决因此产生的 web 编译失败。"
 ```
 
 ---

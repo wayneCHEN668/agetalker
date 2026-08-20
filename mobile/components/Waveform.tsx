@@ -1,5 +1,6 @@
 import React, { useEffect, useRef, useState } from 'react';
 import { View, StyleSheet, Animated, Platform, LayoutChangeEvent } from 'react-native';
+import type { AnalyserNode } from 'react-native-audio-api';
 import { Design } from '../constants/Design';
 
 interface WaveformProps {
