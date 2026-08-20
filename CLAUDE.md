@@ -128,5 +128,28 @@ pytest selftest/test_llm_service.py::test_crisis_detection -v  # single test
 - Tradeoffs: alternatives you considered and why you picked what you did
 - Open questions: anything you'd want m¥e to confirm or revise
 
+## 在 worktree 里干活时：构建/验证一定要确认目录
+
+`.worktrees/` 下的分支和主仓库 checkout 是**两份独立的代码**。这一点在本项目已经坑过两次，
+两次都表现为「验证结果看着正常/异常，但验的根本不是你改的代码」：
+
+1. **构建装机装错源**：从主仓库跑 `gradlew assembleDebug` + `adb install`，装上去的是 master
+   的旧代码。症状极具迷惑性——APP 能跑、大部分页面正常，只有你改的那个功能"没反应"，
+   看起来像新代码有 bug，实际上新代码压根没被编译进去。
+   **快速判别**：`adb shell dumpsys package <包名> | grep -A5 "requested permissions"`
+   对比 worktree 里 `android/app/src/main/AndroidManifest.xml` 的权限声明。对不上就是装错了。
+2. **dev server 起错目录**：`preview_start` 用 `.claude/launch.json` 里的相对 `cwd`，
+   解析基准是**主仓库**，不是当前 worktree。Metro 缓存还在 `%TEMP%\metro-cache`（全局、
+   跨 worktree 共用），会让"改了没生效"更难看出来。
+
+规矩：
+
+- 构建、装机、起 dev server 前，**先 `pwd` 确认在 worktree 里**，用绝对路径，别依赖相对 cwd。
+- 起 web 调试用 `cd <worktree>/mobile && npx expo start --web`，不要用 `preview_start` 的
+  `name` 形式（它会指向主仓库）；要用 Browser 工具就用 `preview_start` 的 `url` 形式接
+  手动起好的服务。
+- 怀疑"改了没生效"时，先查是不是缓存/目录问题，再怀疑代码。`npx expo start --web -c`
+  强制清 Metro 缓存。
+
 ## 调试
 **UPDATE CLAUDE.MD, ADD RULES FOR ANY NEW MISTAKES
