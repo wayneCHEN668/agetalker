@@ -25,3 +25,48 @@ export const floatToInt16 = (samples: Float32Array): Int16Array<ArrayBuffer> => 
   }
   return out;
 };
+
+/**
+ * 流式 16 位小端 PCM 解码器（后端 TTS 那条流的反向操作）。
+ *
+ * 之所以要有状态：一个样本占 2 字节，而流式分片的边界是任意的，完全可能切在样本
+ * 中间。实测 expo/fetch 在 Android 上就会给出零长度分片，而它底层（okio 缓冲区）
+ * 也不保证每片都是偶数字节。不接住跨片的那半个样本，从该处起整段音频会整体错位
+ * 一个字节——听感上就是噪声。
+ *
+ * 用法：每片调一次 push()，返回这一片能解出来的样本；不足半个样本的尾巴会留到
+ * 下一次调用。
+ */
+export const createPcmStreamDecoder = () => {
+  let carryByte: number | null = null;
+
+  return {
+    push(chunk: Uint8Array): Float32Array {
+      // 拼上上一片留下的半个样本
+      let bytes: Uint8Array;
+      if (carryByte === null) {
+        bytes = chunk;
+      } else {
+        bytes = new Uint8Array(chunk.byteLength + 1);
+        bytes[0] = carryByte;
+        bytes.set(chunk, 1);
+        carryByte = null;
+      }
+
+      // 奇数字节：末尾那个留到下一片
+      if (bytes.byteLength % 2 !== 0) {
+        carryByte = bytes[bytes.byteLength - 1];
+        bytes = bytes.subarray(0, bytes.byteLength - 1);
+      }
+
+      const out = new Float32Array(bytes.byteLength / 2);
+      for (let i = 0; i < out.length; i++) {
+        // 手工组小端并做符号扩展：bytes 可能来自 subarray 或拼接，byteOffset 不保证
+        // 2 字节对齐，直接 new Int16Array(buffer, offset, len) 会因对齐要求抛 RangeError。
+        const raw = bytes[i * 2] | (bytes[i * 2 + 1] << 8);
+        out[i] = ((raw << 16) >> 16) / 32768.0;
+      }
+      return out;
+    },
+  };
+};

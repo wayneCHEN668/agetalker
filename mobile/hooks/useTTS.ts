@@ -2,6 +2,7 @@ import { useState, useCallback, useRef } from 'react';
 import { fetch as expoFetch } from 'expo/fetch';
 import { DeviceEventEmitter } from 'react-native';
 import { AudioBufferSourceNode, AudioContext } from 'react-native-audio-api';
+import { createPcmStreamDecoder } from '../audio/pcm';
 import { TTS_CONFIG, TTSParams } from '../constants/TTS';
 
 interface QueueItem {
@@ -94,18 +95,17 @@ export const useTTS = (options: UseTTSOptions = {}) => {
       }
 
       const reader = response.body.getReader();
+      const pcmDecoder = createPcmStreamDecoder();
 
       while (true) {
         const { done, value } = await reader.read();
         if (done) break;
         if (epoch !== epochRef.current) return;   // 已被打断，别再排新的了
 
-        // Convert Uint8Array (PCM 16bit) to Float32 for WebAudio
-        const int16Buffer = new Int16Array(value.buffer, value.byteOffset, value.byteLength / 2);
-        const float32Buffer = new Float32Array(int16Buffer.length);
-        for (let i = 0; i < int16Buffer.length; i++) {
-          float32Buffer[i] = int16Buffer[i] / 32768.0;
-        }
+        // 解码器负责跨片拼接半个样本，见 audio/pcm.ts。这里只可能拿到 0 个或若干个
+        // 完整样本；0 个时直接跳过——createBuffer 帧数为 0 会抛 NotSupportedError。
+        const float32Buffer = pcmDecoder.push(value);
+        if (float32Buffer.length === 0) continue;
 
         // Create AudioBuffer
         const audioBuffer = ctx.createBuffer(1, float32Buffer.length, TTS_CONFIG.SAMPLE_RATE);
