@@ -19,6 +19,8 @@ export const Design = {
     crisis: '#D4453B',
     // 录音中状态（暖色调，不打断情感弧线）
     recording: '#7A6E68',
+    // 正在聆听状态（暖琥珀）——StatusBar 圆点、Waveform 波形渐变共用
+    listening: '#E8A838',
 
     // 情绪背景光晕 (Aura Colors) — 保持语义，调整色调与暖暮协调
     aura: {

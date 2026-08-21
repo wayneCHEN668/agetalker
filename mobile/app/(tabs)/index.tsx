@@ -587,7 +587,7 @@ export default function HomeScreen() {
           accessibilityLabel={viewMode === 'orb' ? '切换到对话文字' : '切换到抽象圆点'}
         >
           <Text style={styles.viewModeToggleText}>
-            {viewMode === 'orb' ? '看文字' : '看圆'}
+            {viewMode === 'orb' ? '清晰文字' : '治愈圆环'}
           </Text>
         </TouchableOpacity>
       </View>

@@ -1,8 +1,7 @@
 import { StatusBar } from 'expo-status-bar';
 import type { ReactNode } from 'react';
-import { Platform, ScrollView, StyleSheet } from 'react-native';
+import { Platform, ScrollView, StyleSheet, Text, View } from 'react-native';
 
-import { Text, View } from '@/components/Themed';
 import { Design } from '@/constants/Design';
 
 /**
@@ -81,6 +80,7 @@ function Paragraph({ children, style }: { children: ReactNode; style?: object })
 const styles = StyleSheet.create({
   container: {
     flex: 1,
+    backgroundColor: Design.colors.background,
   },
   scrollContent: {
     paddingHorizontal: Design.layout.innerPadding,

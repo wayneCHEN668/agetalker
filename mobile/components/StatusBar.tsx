@@ -87,7 +87,7 @@ export const StatusBar: React.FC<StatusBarProps> = ({ status }) => {
   };
 
   const dotColor = status === 'listening'
-    ? '#E8A838'
+    ? Design.colors.listening
     : status === 'processing'
     ? Design.colors.primary
     : Design.colors.text.hint;

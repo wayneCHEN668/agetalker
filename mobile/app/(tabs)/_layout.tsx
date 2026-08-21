@@ -1,19 +1,18 @@
 import React from 'react';
 import { Link, Tabs } from 'expo-router';
 import { Pressable, Text } from 'react-native';
+import { useSafeAreaInsets } from 'react-native-safe-area-context';
 
-import Colors from '@/constants/Colors';
-import { useColorScheme } from '@/components/useColorScheme';
 import { useClientOnlyValue } from '@/components/useClientOnlyValue';
 import { Design } from '@/constants/Design';
 
 export default function TabLayout() {
-  const colorScheme = useColorScheme();
+  const insets = useSafeAreaInsets();
 
   return (
     <Tabs
       screenOptions={{
-        tabBarActiveTintColor: Colors[colorScheme ?? 'light'].tint,
+        tabBarActiveTintColor: Design.colors.primary,
         headerShown: useClientOnlyValue(false, true),
         tabBarLabelStyle: {
           fontSize: 16,
@@ -28,16 +27,14 @@ export default function TabLayout() {
           fontFamily: 'Lexend_400Regular',
         },
         headerStyle: {
-          height: 50,
+          height: 50 + insets.top,
         },
       }}>
       <Tabs.Screen
         name="index"
         options={{
           title: '聊聊天',
-          tabBarIcon: ({ color }) => (
-            <Text style={{ fontSize: 24, color }}>💬</Text>
-          ),
+          tabBarIcon: () => null,
           headerRight: () => (
             <Link href="/modal" asChild>
               <Pressable>
@@ -46,7 +43,7 @@ export default function TabLayout() {
                     style={{
                       fontFamily: Design.typography.fontFamily,
                       fontSize: 15,
-                      color: Colors[colorScheme ?? 'light'].text,
+                      color: Design.colors.text.primary,
                       marginRight: 15,
                       opacity: pressed ? 0.5 : 1,
                     }}>
@@ -62,18 +59,14 @@ export default function TabLayout() {
         name="two"
         options={{
           title: '练练脑',
-          tabBarIcon: ({ color }) => (
-            <Text style={{ fontSize: 24, color }}>🧠</Text>
-          ),
+          tabBarIcon: () => null,
         }}
       />
       <Tabs.Screen
         name="profile"
         options={{
           title: '我自己',
-          tabBarIcon: ({ color }) => (
-            <Text style={{ fontSize: 24, color }}>🙋</Text>
-          ),
+          tabBarIcon: () => null,
         }}
       />
     </Tabs>

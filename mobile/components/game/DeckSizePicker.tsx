@@ -46,13 +46,12 @@ export default function DeckSizePicker({ value, onChange }: Props) {
 const styles = StyleSheet.create({
   row: {
     flexDirection: 'row',
-    gap: 10,
+    gap: 6,
     justifyContent: 'center',
-    flexWrap: 'wrap',
   },
   option: {
-    minHeight: 64, // 与卡片同一个手抖容错标准
-    paddingHorizontal: 20,
+    minHeight: 48,
+    paddingHorizontal: 12,
     justifyContent: 'center',
     borderRadius: Design.layout.radiusSmall,
     borderWidth: 1,
@@ -67,7 +66,7 @@ const styles = StyleSheet.create({
   },
   label: {
     fontFamily: Design.typography.fontFamily,
-    fontSize: 18,
+    fontSize: 15,
   },
   labelIdle: { color: Design.colors.text.secondary },
   labelActive: { color: Design.colors.onPrimaryContainer },

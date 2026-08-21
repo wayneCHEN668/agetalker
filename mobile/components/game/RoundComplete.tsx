@@ -48,7 +48,7 @@ const styles = StyleSheet.create({
     minHeight: 64,
     paddingHorizontal: 36,
     justifyContent: 'center',
-    borderRadius: Design.layout.radius,
+    borderRadius: 32, // 与主 CTA 一致的整圆角胶囊（半径 = 高度/2）
     backgroundColor: Design.colors.primary,
   },
   buttonText: {

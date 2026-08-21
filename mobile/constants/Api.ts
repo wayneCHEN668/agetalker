@@ -5,7 +5,7 @@
  * 极易漏改。现在只改这一处。
  */
 
-export const API_HOST = '47.253.82.38';
+export const API_HOST = '81.69.17.148';
 export const API_PORT = 8050;
 
 export const API_BASE_URL = `http://${API_HOST}:${API_PORT}`;

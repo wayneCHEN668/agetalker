@@ -80,14 +80,14 @@ export const ActionButton: React.FC<ActionButtonProps> = ({ isRecording, onPress
 const styles = StyleSheet.create({
   container: {
     alignItems: 'center',
-    paddingBottom: 48,
+    paddingBottom: 24,
     paddingHorizontal: Design.layout.spacing * 2,
   },
   button: {
     width: '100%',
     maxWidth: 320,
-    height: 80,
-    borderRadius: 40,
+    height: 64,
+    borderRadius: 32,
     shadowColor: Design.colors.primary,
     shadowOffset: { width: 0, height: 8 },
     shadowOpacity: 0.2,
@@ -101,16 +101,16 @@ const styles = StyleSheet.create({
     alignItems: 'center',
     justifyContent: 'center',
     gap: 10,
-    borderRadius: 40,
+    borderRadius: 32,
   },
   icon: {
-    fontSize: 22,
+    fontSize: 20,
     color: '#FFFFFF',
     opacity: 0.9,
   },
   text: {
     fontFamily: Design.typography.fontFamily,
-    fontSize: 22,
+    fontSize: 20,
     color: '#FFFFFF',
     fontWeight: '700',
     letterSpacing: 1.5,

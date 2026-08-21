@@ -98,7 +98,7 @@ export const Waveform: React.FC<WaveformProps> = ({ isActive, analyser }) => {
       // Warm Twilight gradient: dusty rose to warm amber
       const gradient = ctx.createLinearGradient(0, 0, canvas.width, 0);
       gradient.addColorStop(0, Design.colors.primary);
-      gradient.addColorStop(0.5, '#E8A838');
+      gradient.addColorStop(0.5, Design.colors.listening);
       gradient.addColorStop(1, Design.colors.primary);
 
       const drawWave = (offset: number, alpha: number, lineWidth: number) => {

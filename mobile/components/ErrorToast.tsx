@@ -114,6 +114,7 @@ const styles = StyleSheet.create({
   icon: {
     fontSize: 20,
     marginRight: 10,
+    color: Design.colors.primary,
   },
   text: {
     flex: 1,

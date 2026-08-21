@@ -1,17 +1,18 @@
 import { Link, Stack } from 'expo-router';
-import { StyleSheet } from 'react-native';
+import { StyleSheet, Text, View } from 'react-native';
 
-import { Text, View } from '@/components/Themed';
+import { Design } from '@/constants/Design';
 
 export default function NotFoundScreen() {
   return (
     <>
-      <Stack.Screen options={{ title: 'Oops!' }} />
+      <Stack.Screen options={{ title: '走丢了' }} />
       <View style={styles.container}>
-        <Text style={styles.title}>This screen doesn't exist.</Text>
+        <Text style={styles.title}>这个页面不存在</Text>
+        <Text style={styles.hint}>可能是链接不对，回到聊天页看看吧。</Text>
 
         <Link href="/" style={styles.link}>
-          <Text style={styles.linkText}>Go to home screen!</Text>
+          <Text style={styles.linkText}>回到聊聊天</Text>
         </Link>
       </View>
     </>
@@ -23,18 +24,36 @@ const styles = StyleSheet.create({
     flex: 1,
     alignItems: 'center',
     justifyContent: 'center',
-    padding: 20,
+    padding: Design.layout.spacing,
+    backgroundColor: Design.colors.background,
   },
   title: {
-    fontSize: 20,
-    fontWeight: 'bold',
+    fontFamily: Design.typography.fontFamily,
+    fontSize: Design.typography.headline.fontSize,
+    lineHeight: Design.typography.headline.lineHeight,
+    fontWeight: Design.typography.headline.fontWeight,
+    color: Design.colors.text.primary,
+    textAlign: 'center',
+  },
+  hint: {
+    fontFamily: Design.typography.fontFamily,
+    fontSize: Design.typography.message.fontSize,
+    lineHeight: Design.typography.message.lineHeight,
+    color: Design.colors.text.secondary,
+    textAlign: 'center',
+    marginTop: 8,
   },
   link: {
-    marginTop: 15,
-    paddingVertical: 15,
+    marginTop: Design.layout.spacing,
+    paddingHorizontal: 24,
+    paddingVertical: 14,
+    borderRadius: 26,
+    backgroundColor: Design.colors.primary,
   },
   linkText: {
-    fontSize: 14,
-    color: '#2e78b7',
+    fontFamily: Design.typography.fontFamily,
+    fontSize: 16,
+    fontWeight: '600',
+    color: Design.colors.onPrimary,
   },
 });

@@ -1,0 +1,154 @@
+{
+  "schemaVersion": 2,
+  "generatedAt": "2026-08-21T05:00:00Z",
+  "title": "Design System: AgeTalker",
+  "extensions": {
+    "colorMeta": {
+      "dusty-rose": {
+        "role": "primary",
+        "displayName": "Dusty Rose",
+        "canonical": "oklch(65% 0.09 35)",
+        "tonalRamp": ["oklch(15% 0.03 35)", "oklch(27% 0.05 35)", "oklch(39% 0.07 35)", "oklch(51% 0.08 35)", "oklch(65% 0.09 35)", "oklch(76% 0.07 35)", "oklch(87% 0.04 35)", "oklch(95% 0.015 35)"]
+      },
+      "warm-cream": {
+        "role": "neutral",
+        "displayName": "Warm Cream",
+        "canonical": "oklch(97% 0.01 60)",
+        "tonalRamp": ["oklch(15% 0.02 60)", "oklch(28% 0.02 60)", "oklch(40% 0.015 60)", "oklch(55% 0.012 60)", "oklch(70% 0.01 60)", "oklch(84% 0.01 60)", "oklch(92% 0.01 60)", "oklch(97% 0.01 60)"]
+      },
+      "deep-umber": {
+        "role": "text-on-primary-container",
+        "displayName": "Deep Umber",
+        "canonical": "oklch(25% 0.04 40)",
+        "tonalRamp": ["oklch(15% 0.03 40)", "oklch(25% 0.04 40)", "oklch(35% 0.04 40)", "oklch(45% 0.035 40)", "oklch(58% 0.03 40)", "oklch(70% 0.02 40)", "oklch(84% 0.01 40)", "oklch(95% 0.005 40)"]
+      },
+      "warm-taupe": {
+        "role": "secondary",
+        "displayName": "Warm Taupe",
+        "canonical": "oklch(50% 0.02 40)",
+        "tonalRamp": ["oklch(15% 0.015 40)", "oklch(27% 0.018 40)", "oklch(39% 0.02 40)", "oklch(50% 0.02 40)", "oklch(62% 0.018 40)", "oklch(74% 0.014 40)", "oklch(86% 0.01 40)", "oklch(95% 0.006 40)"]
+      },
+      "caregiver-alert": {
+        "role": "alert (caregiver-only, never resident-facing)",
+        "displayName": "Caregiver Alert Red",
+        "canonical": "oklch(52% 0.19 25)",
+        "tonalRamp": ["oklch(15% 0.08 25)", "oklch(27% 0.12 25)", "oklch(39% 0.15 25)", "oklch(52% 0.19 25)", "oklch(64% 0.16 25)", "oklch(76% 0.11 25)", "oklch(87% 0.06 25)", "oklch(95% 0.02 25)"]
+      }
+    },
+    "typographyMeta": {
+      "display": { "displayName": "Display", "purpose": "Rare full-screen headline moment (e.g. onboarding). Not used in daily-use screens." },
+      "headline": { "displayName": "Headline", "purpose": "Screen-level headings." },
+      "message": { "displayName": "Message", "purpose": "The workhorse size: chat bubble text and primary reading content." },
+      "caption": { "displayName": "Caption", "purpose": "Secondary metadata: status text, card word labels." },
+      "label": { "displayName": "Label", "purpose": "Small emphasis labels, used sparingly (strategy badges)." }
+    },
+    "shadows": [
+      { "name": "whisper", "value": "0 2px 8px rgba(0,0,0,0.04)", "purpose": "Default for chat bubbles and the status pill. Barely perceptible presence, not depth." },
+      { "name": "held", "value": "0 8px 24px rgba(0,0,0,0.12)", "purpose": "Modal dialogs — a firmer lift because it interrupts the flow." },
+      { "name": "called-out", "value": "0 8px 16px rgba(193,123,106,0.2)", "purpose": "The primary CTA button and AI avatar, tinted with the component's own color rather than black." }
+    ],
+    "motion": [
+      { "name": "press-spring", "value": "spring, scale to 0.96", "purpose": "Button press feedback. Soft, not snappy — no elastic overshoot." },
+      { "name": "pulse-listening", "value": "ease timing, scale 1 to 1.04-1.05, 600-800ms loop", "purpose": "Gentle breathing pulse while actively listening or recording." }
+    ],
+    "breakpoints": []
+  },
+  "components": [
+    {
+      "name": "Primary Button",
+      "kind": "button",
+      "refersTo": "button-primary",
+      "description": "The one main call-to-action per screen (\"我想和你聊聊\" / talk-to-me). Full pill, tinted colored shadow, scales down softly on press.",
+      "html": "<button class=\"ds-btn-primary\"><span class=\"ds-btn-icon\">♪</span>我想和你聊聊</button>",
+      "css": ".ds-btn-primary { display: inline-flex; align-items: center; justify-content: center; gap: 10px; height: 64px; padding: 0 24px; background: #C17B6A; color: #FFFFFF; font-family: 'Lexend', sans-serif; font-size: 20px; font-weight: 700; letter-spacing: 1.5px; border: none; border-radius: 32px; box-shadow: 0 8px 16px rgba(193,123,106,0.2); transition: transform 0.2s cubic-bezier(0.4,0,0.2,1); } .ds-btn-primary:hover { transform: translateY(-1px); } .ds-btn-primary:active { transform: scale(0.96); } .ds-btn-icon { opacity: 0.9; }"
+    },
+    {
+      "name": "Emotion Chip",
+      "kind": "chip",
+      "refersTo": "chip-emotion",
+      "description": "Small informational tag under a chat bubble showing detected acoustic emotion. Not interactive.",
+      "html": "<span class=\"ds-chip-emotion\">感受：温暖</span>",
+      "css": ".ds-chip-emotion { display: inline-block; padding: 3px 10px; background: rgba(193,123,106,0.15); color: #3D231B; font-family: 'Lexend', sans-serif; font-size: 14px; font-weight: 600; border-radius: 12px; }"
+    },
+    {
+      "name": "Category Chip",
+      "kind": "chip",
+      "refersTo": "chip-category",
+      "description": "Small informational tag showing the psychological category the router assigned. Slightly lower emphasis than the emotion chip.",
+      "html": "<span class=\"ds-chip-category\">状态：平静</span>",
+      "css": ".ds-chip-category { display: inline-block; padding: 3px 10px; background: rgba(193,123,106,0.08); color: #7A6E68; font-family: 'Lexend', sans-serif; font-size: 14px; font-weight: 500; border: 0.5px solid rgba(193,123,106,0.20); border-radius: 12px; }"
+    },
+    {
+      "name": "Assistant Chat Bubble",
+      "kind": "custom",
+      "refersTo": "chat-bubble-assistant",
+      "description": "AI reply bubble: round avatar, paper-white bubble with a hairline border, tail corner flattened toward the avatar.",
+      "html": "<div class=\"ds-bubble-row\"><div class=\"ds-avatar\">伴</div><div class=\"ds-bubble-assistant\">您可以随时对我说话，我会一直在这里陪着您。</div></div>",
+      "css": ".ds-bubble-row { display: flex; align-items: flex-end; gap: 8px; } .ds-avatar { width: 36px; height: 36px; border-radius: 18px; background: #C17B6A; color: #FFFFFF; display: flex; align-items: center; justify-content: center; font-family: 'Lexend', sans-serif; font-size: 15px; font-weight: 600; box-shadow: 0 2px 4px rgba(193,123,106,0.2); flex-shrink: 0; } .ds-bubble-assistant { max-width: 82%; padding: 14px 18px; background: #FFFFFF; color: #2D2320; font-family: 'Lexend', sans-serif; font-size: 18px; line-height: 28px; border: 1px solid #E8E0DB; border-radius: 24px; border-bottom-left-radius: 4px; }"
+    },
+    {
+      "name": "User Chat Bubble",
+      "kind": "custom",
+      "refersTo": "chat-bubble-user",
+      "description": "The resident's own message, right-aligned, filled with the Blush Container tint rather than the paper-white used for assistant replies.",
+      "html": "<div class=\"ds-bubble-user\">今天天气真好</div>",
+      "css": ".ds-bubble-user { max-width: 82%; margin-left: auto; padding: 14px 18px; background: #F5E4DE; color: #3D231B; font-family: 'Lexend', sans-serif; font-size: 18px; line-height: 28px; border-radius: 24px; border-bottom-right-radius: 4px; }"
+    },
+    {
+      "name": "Memory Card (matched)",
+      "kind": "card",
+      "refersTo": "card-memory-matched",
+      "description": "The single positive-feedback state in the memory game. No negative state exists by design.",
+      "html": "<div class=\"ds-card-matched\"><span>🌼</span><span class=\"ds-card-word\">向日葵</span></div>",
+      "css": ".ds-card-matched { width: 92px; height: 92px; display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 4px; background: #F5E4DE; border: 1px solid #F5E4DE; border-radius: 12px; } .ds-card-word { font-family: 'Lexend', sans-serif; font-size: 14px; color: #6B5E58; }"
+    },
+    {
+      "name": "Confirm Dialog",
+      "kind": "custom",
+      "refersTo": "dialog-confirm",
+      "description": "Modal confirmation, e.g. ending a session. Firmer shadow than any other surface since it must read as clearly above the rest of the screen.",
+      "html": "<div class=\"ds-dialog-overlay\"><div class=\"ds-dialog\"><div class=\"ds-dialog-title\">结束对话？</div><div class=\"ds-dialog-message\">确定要结束这次聊天吗？</div><div class=\"ds-dialog-actions\"><button class=\"ds-dialog-cancel\">取消</button><button class=\"ds-dialog-confirm\">结束</button></div></div></div>",
+      "css": ".ds-dialog-overlay { background: rgba(0,0,0,0.25); display: flex; align-items: center; justify-content: center; padding: 40px; } .ds-dialog { background: #FFFFFF; border-radius: 24px; padding: 28px; max-width: 340px; width: 100%; box-shadow: 0 8px 24px rgba(0,0,0,0.12); } .ds-dialog-title { font-family: 'Lexend', sans-serif; font-size: 20px; font-weight: 600; color: #2D2320; margin-bottom: 8px; } .ds-dialog-message { font-family: 'Lexend', sans-serif; font-size: 16px; line-height: 24px; color: #6B5E58; margin-bottom: 24px; } .ds-dialog-actions { display: flex; justify-content: flex-end; gap: 12px; } .ds-dialog-cancel { padding: 10px 20px; background: #F5F1ED; color: #6B5E58; font-family: 'Lexend', sans-serif; font-size: 16px; font-weight: 500; border: none; border-radius: 12px; } .ds-dialog-confirm { padding: 10px 20px; background: #C17B6A; color: #FFFFFF; font-family: 'Lexend', sans-serif; font-size: 16px; font-weight: 600; border: none; border-radius: 12px; }"
+    },
+    {
+      "name": "Bottom Tab Bar",
+      "kind": "nav",
+      "refersTo": "nav-tab-bar",
+      "description": "Text-only bottom navigation (icons deliberately removed). Active tab tinted Dusty Rose.",
+      "html": "<nav class=\"ds-tabbar\"><span class=\"ds-tab ds-tab-active\">聊聊天</span><span class=\"ds-tab\">练练脑</span><span class=\"ds-tab\">我自己</span></nav>",
+      "css": ".ds-tabbar { display: flex; height: 72px; padding-bottom: 8px; align-items: center; justify-content: space-around; background: #FFFFFF; border-top: 1px solid #E8E0DB; } .ds-tab { font-family: 'Lexend', sans-serif; font-size: 16px; color: #6B5E58; } .ds-tab-active { color: #C17B6A; font-weight: 600; }"
+    }
+  ],
+  "narrative": {
+    "northStar": "The Healing Hour",
+    "overview": "AgeTalker exists for one quiet hour at a time: a resident alone with their phone, wanting to be heard. Every screen behaves like a calm room, not a control panel. Nothing blinks for attention, nothing scores or streaks the user, nothing announces itself with urgency. Warmth is carried structurally, through dusty-rose and warm cream held at low saturation, through generous rounded shapes, and through type that stays large and unhurried rather than dense. This system explicitly rejects three lanes: it is not a medical-device interface, not a tech-company product, and not a children's app. It is an adult companion, dressed like a warm, unhurried living room rather than a screen.",
+    "keyCharacteristics": [
+      "Warm, desaturated dusty-rose + cream palette; near-black text tinted warm, never pure #000",
+      "Single humanist typeface (Lexend) at generous sizes throughout",
+      "Pill and soft-rounded-rectangle shapes everywhere; no sharp corners",
+      "Shadows nearly flat (ambient, opacity 0.04-0.12); lift appears only where it matters",
+      "No badges, streaks, red dots, or urgency-driven UI patterns anywhere in the resident-facing surface"
+    ],
+    "rules": [
+      { "name": "The One Warm Hue Rule", "body": "Every color in the system is a tint or shade of the same warm rose/umber hue family. No cool gray, no blue-black, no unrelated second hue.", "section": "colors" },
+      { "name": "The Caregiver-Only Red Rule", "body": "#D4453B never colors the ambient experience (background aura, dialog copy, chrome), even during an actual crisis — that stays warm amber. The one exception is the Contact Caregiver action button itself, which is allowed to be red so it reads as unmistakably actionable against an otherwise calm screen.", "section": "colors" },
+      { "name": "The No-Small-Print Rule", "body": "13px is the type-size floor. Nothing in the resident-facing UI goes smaller.", "section": "typography" },
+      { "name": "The Earned Lift Rule", "body": "Shadow strength scales with how much a component deserves attention, not with its structural importance in code.", "section": "elevation" }
+    ],
+    "dos": [
+      "Do keep every color a tint or shade of the dusty-rose/warm-umber hue family.",
+      "Do use full pill shapes for primary actions and generous (12-24px) radii everywhere else.",
+      "Do keep shadows near-flat by default (opacity <= 0.12) and reserve stronger lift for the one primary action per screen.",
+      "Do keep body text at 18px/28px line-height minimum for close reading; never go below 13px anywhere.",
+      "Do route anything urgent or crisis-related through warm amber, never red, on any resident-facing screen."
+    ],
+    "donts": [
+      "Don't introduce cold blues/grays, alarm-red, or instrument-panel precision.",
+      "Don't add oversized rounded mascots, candy colors, or bouncy/elastic easing.",
+      "Don't use dark-mode-by-default, neon accents, geometric hard edges, or dashboard-style chrome.",
+      "Don't add popups, red notification dots, badges, streaks, or marketing-voice copy anywhere.",
+      "Don't put a decorative icon above every tab bar label by default; text-only labels were a deliberate choice.",
+      "Don't give the memory game a negative-feedback color or shake animation on a mismatch."
+    ]
+  }
+}

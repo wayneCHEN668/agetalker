@@ -183,11 +183,9 @@ const styles = StyleSheet.create({
     paddingHorizontal: 18,
     paddingVertical: 14,
     borderRadius: Design.layout.radius,
-    shadowColor: '#000',
-    shadowOffset: { width: 0, height: 2 },
-    shadowOpacity: 0.04,
-    shadowRadius: 8,
-    elevation: 2,
+    // 气泡的圆角不是四角统一的（有一角被削平做"尖角"），Android 上
+    // elevation/阴影 跟非统一圆角搭配会在削平的那个角附近漏出方形阴影角——
+    // 这一点点阴影本来就"几乎看不见"，不值得为它保留这个视觉 bug，去掉。
   },
   userBubble: {
     backgroundColor: Design.colors.primaryContainer,

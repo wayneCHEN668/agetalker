@@ -230,7 +230,7 @@ const styles = StyleSheet.create({
   error: {
     fontFamily: Design.typography.fontFamily,
     fontSize: 16,
-    color: Design.colors.crisis,
+    color: Design.colors.primary,
     marginBottom: 16,
   },
   row: {
