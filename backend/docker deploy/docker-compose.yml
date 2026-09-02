@@ -1,0 +1,15 @@
+services:
+  agetalker-backend:
+    build: .
+    image: agetalker-backend:latest
+    container_name: agetalker-backend
+    restart: unless-stopped
+    ports:
+      - "8050:8050"
+    env_file:
+      - .env
+    volumes:
+      # 运行时数据（记忆台账、画像、危机事件）：容器重启/重建不丢
+      - ./data:/app/data
+      # 模型权重（~3.9G）：不打进镜像，见 DEPLOY.md 关于怎么把这份目录弄到服务器上
+      - ./.model_cache:/app/.model_cache
